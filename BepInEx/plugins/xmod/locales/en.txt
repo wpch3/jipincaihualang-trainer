@@ -1,0 +1,109 @@
+# 面板使用
+label.target=Select Target
+label.current=Current: {0}
+item.title=Add Item
+search=Search
+search.input=
+label.selectTarget=Select Target
+property.title=Property Editing
+settings.title=Settings
+settings.notification=Notifications
+cancel=Cancel
+confirm=Confirm
+item.add.title=Add Item
+item.quantity=Quantity
+nav.settings=Settings
+nav.item=Item Editing
+nav.misc=Miscellaneous
+nav.property=Property Editing
+group.heroAttributes=Hero Attribute
+laguage.desc=Select your preferred language
+laguage.title=Language
+all=All
+
+
+#扩展
+prop.level=Level
+prop.intelligence=Intelligence
+prop.talent=Talent
+prop.exp=Experience
+prop.battle_count=Battle Count
+prop.kill_count=Kill Count
+prop.win_count=Win Count
+prop.honor_level=Honor Level
+prop.hp=Health
+prop.hit_rate1=Hit Rate 1
+prop.hit_rate2=Hit Rate 2
+prop.dodge=Dodge
+prop.power=Power
+prop.power_recover=Power Recovery
+prop.bravery=Bravery
+prop.crit=Critical Rate
+prop.move_speed=Movement Speed
+prop.rotate_speed=Rotation Speed
+prop.loyalty=Loyalty
+
+#咒语旅团
+group.basicAttributes=Baic Attributes
+
+#鬼山魔音
+type.Weapon=Weapon
+type.Ammunition=Ammunition
+type.HealingItem=Healing Item
+type.Item=Item
+type.Material=Material
+type.Unknown=Unknown
+label.addskill=Add Skill
+
+#手游模拟器
+type.Equi=Equipment
+type.LingQi=Spirit Tool
+type.Mat=Material
+type.LingPai=Token
+type.BaoShi=Gem
+type.SuiPian=Fragment
+type.BaoXiang=Treasure Chest
+type.Asset=Resource
+type.Special=Special
+
+#恐龙
+type.Resources=Resources
+type.Seeds=Seeds
+type.Fertillizer=Fertilizer
+type.FoodMaterials=Food Materials
+type.Food=Food
+type.DinoEgg=Dino Egg
+type.Unknown=Unknown
+group.Totem=Totem
+group.Relic=Relic
+quality.Common=Common
+quality.Rare=Rare
+quality.Epic=Epic
+quality.Legendary=Legendary
+prop.MaxHp=Max Health
+prop.Shield=Shield
+prop.ReduceDamage=Damage Reduction
+prop.Dodge=Dodge
+group.playerAttributes=Player Attributes (Campaign)
+group.dinoAttributes=Dino Attributes (Home)
+prop.MaxTired=Max Tired
+prop.MaxSatiety=Max Satiety
+prop.MaxHealth=Max Vitality
+prop.HatchWorkAbility=Base Work Efficiency
+prop.HatchAttack=Base Attack Power
+prop.HatchMaxAction=Base Max Energy
+prop.RecoverAction=Base Energy Recovery
+prop.HatchWalkSpeed=Base Walk Speed
+prop.HatchRunSpeed=Base Run Speed
+
+label.skill=Skill
+label.gem=Gem
+type.Equip=Equip
+type.Material=Material
+type.Seed=Seed
+type.Important=Important
+type.Gift=Gift
+type.Formula=Formula
+type.Drug=Drug
+type.Consumables=Consumables
+type.Raw=Raw
