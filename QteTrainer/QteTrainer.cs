@@ -70,8 +70,7 @@ namespace QteTrainer
             if (!show)
                 return;
 
-            GUI.skin = null;
-            GUILayout.BeginArea(new Rect(8, 8, 330, 320), GUI.skin.window);
+            GUILayout.BeginArea(new Rect(8, 8, 330, 320));
             GUILayout.Label("<b>QTE / 万能 Trainer</b>", GUI.skin.label);
 
             QteTrainerPlugin.QteAutoWin.Value = GUILayout.Toggle(QteTrainerPlugin.QteAutoWin.Value, "QTE 自动通关（空格节奏 + AD 平衡）");
@@ -111,7 +110,6 @@ namespace QteTrainer
                 p.CurtEnergy = 999f;
             if (p.AtkCounter < 999f)
                 p.AtkCounter = 999f;
-            try { __instance.MissGuardCounter = 9999f; } catch { }
         }
     }
 
