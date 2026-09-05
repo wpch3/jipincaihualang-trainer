@@ -869,10 +869,8 @@ namespace QteTrainer
                 if (!QteTrainerPlugin.On)
                 {
                     // 总开关关闭: 不建任何 GUILayout 结构, 只用一条自包含的 GUI.Label 提示按键。
-                    if (QteTrainerPlugin.ShowHint.Value)
-                        GUI.Label(new Rect(8, 8, 460, 22),
-                            $"QTE Trainer 已停用 —— 按 {QteTrainerPlugin.ToggleKey.Value} 开启全部功能",
-                            GUI.skin.label);
+                    // 单独 try/catch: 提示画不出来不应该连累面板被永久禁用。
+                    DrawHint();
                     return;
                 }
 
@@ -893,6 +891,33 @@ namespace QteTrainer
                         "OnGUI 连续异常, 面板已永久关闭(功能仍然可用, 只是不再绘制 UI)。" +
                         "请把这条日志发给开发者。");
                 }
+            }
+        }
+
+        private bool hintDisabled;
+
+        /// <summary>
+        /// 总开关关闭时的那行按键提示。只用 GUI.Label —— 它不进 GUILayout 的 layout 栈,
+        /// 是自包含的一次绘制, 本游戏里已验证可用(旧版面板的 GUILayout.Label 正常工作)。
+        /// 画不出来就只关掉提示本身, 不影响面板与功能。
+        /// </summary>
+        private void DrawHint()
+        {
+            if (hintDisabled || !QteTrainerPlugin.ShowHint.Value)
+                return;
+
+            try
+            {
+                var skin = GUI.skin;
+                GUI.Label(new Rect(8, 8, 460, 22),
+                    $"QTE Trainer 已停用 —— 按 {QteTrainerPlugin.ToggleKey.Value} 开启全部功能",
+                    skin != null ? skin.label : null);
+            }
+            catch (Exception ex)
+            {
+                hintDisabled = true;
+                QteTrainerPlugin.LogSource?.LogWarning(
+                    $"按键提示绘制失败, 已关闭提示(功能不受影响): {ex.GetType().Name}: {ex.Message}");
             }
         }
 
