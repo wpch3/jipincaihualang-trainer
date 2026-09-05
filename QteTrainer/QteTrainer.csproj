@@ -78,6 +78,12 @@
       <HintPath>..\BepInEx\interop\UnityEngine.InputLegacyModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- 热键必须走新的 Input System: 本游戏 Active Input Handling = Input System Package(New),
+         UnityEngine.Input.* 会直接抛 InvalidOperationException(见 BepInEx/LogOutput.log)。 -->
+    <Reference Include="Unity.InputSystem">
+      <HintPath>..\BepInEx\interop\Unity.InputSystem.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="UnityEngine.UI">
       <HintPath>..\BepInEx\interop\UnityEngine.UI.dll</HintPath>
       <Private>false</Private>

@@ -29,8 +29,12 @@
 - 快捷传送：游戏内输入锚点/传送点 Key 后立即传送；码头/黑沼泽/祭坛预设 Key 可在 cfg 中填写。
 - 配置导出/导入：将当前所有开关与传送预设导出到 `BepInEx/config/arena.qte.trainer.preset.txt`，可一键还原。
 - 一键全开 / 一键全关：快速套用“最强作弊预设”或“全关预设”。
-- 游戏内 ONGUI 面板，`F4` 一键全开、`F5` 显示/隐藏，每个功能可实时开关。
-- 全部选项写入 `BepInEx/config/arena.qte.trainer.cfg`，重启后保留。
+- **总开关（Master）默认关闭**：游戏一打开时所有功能都是关的，插件对游戏完全不介入。
+  进入游戏后按 `F8` 打开总开关（面板同时弹出），再按 `F8` 一键全部关闭并回到未修改状态。
+- 游戏内 ONGUI 面板，`F9` 显示/隐藏，每个功能可实时开关。
+- 传送 Key 用面板上的**字符键盘**输入（本游戏不能用文本框，原因见下面「黑屏问题」）。
+- 全部选项写入 `BepInEx/config/arena.qte.trainer.cfg`，重启后保留；但 `Master/Enabled` 与
+  `UI/ShowPanel` 每次启动都会被强制重置为 false（除非把 `Master/EnableOnStart` 设为 true）。
 
 ## 安装
 
@@ -66,13 +70,10 @@ QteTrainer\bin\Release\net6.0\QteTrainer.dll
 
 ## 方案 B：用 GitHub Actions 构建（无需本机 SDK）
 
-把仓库中的 `QteTrainer/github-actions-build.yml` 复制到
-`.github/workflows/build-qte-trainer.yml` 并推送（推 workflow 需要仓库工作流权限 /
-Actions 开启），完成后在 Actions 的 Artifact 里下载 `QteTrainer`。
-
-> 当前沙箱内以 GitHub App 身份登录，缺少 `workflows` 权限，所以只能把 workflow
-> 以普通文件保留在 `QteTrainer/github-actions-build.yml`，不能替你写入
-> `.github/workflows/`。需要你手动放入并开启 Actions。
+仓库里已经有 `.github/workflows/build-qte-trainer.yml`（`QteTrainer/github-actions-build.yml`
+是同一份的副本）。只要 `QteTrainer/**` 有改动并推送，Actions 就会自动
+`dotnet build QteTrainer/QteTrainer.csproj -c Release`，完成后在 Actions 的
+Artifact 里下载 `QteTrainer`（即 `QteTrainer.dll`）。
 
 ## 源码结构
 
@@ -83,8 +84,62 @@ Actions 开启），完成后在 Actions 的 Artifact 里下载 `QteTrainer`。
 - `analysis_game_symbols.txt`: 由 Cpp2IL 假程序集抽取的关键符号清单。
 - `tools/il_dump.py`: Python 读 IL 的小工具（`dnfile + dncil`）。
 
+## 黑屏问题（v1.2.0 修复）
+
+v1.1.0 进游戏黑屏但进程不退出，`BepInEx/LogOutput.log` 里其实写明了原因，一共三处：
+
+1. **`GUILayout.TextField` 在本游戏里根本无法使用。** 日志里每帧刷：
+
+   ```
+   System.NotSupportedException: Method unstripping failed
+      at UnityEngine.TextEditor.UpdateScrollOffset()
+      at UnityEngine.TextEditor.set_position(Rect value)
+      at UnityEngine.GUI.DoTextField(...)
+      at UnityEngine.GUILayout.TextField(...)
+      at QteTrainer.QteTrainerUi.OnGUI()
+   ```
+
+   `TextEditor.set_position` / `UpdateScrollOffset` 在这个 IL2CPP 构建里被裁剪掉了，
+   Il2CppInterop 无法 unstrip。异常从 `OnGUI` 中途抛出，`BeginArea` / `BeginHorizontal`
+   没有配对的 `EndHorizontal` / `EndArea`，IMGUI 的 layout / GUIClip 栈每帧残留一层，
+   而 IL2CPP trampoline 又不会把异常传回原生侧做清理 —— 这就是「画面黑了、进程还在跑」
+   的来源。日志里这条错误出现了 256 次，全部发生在第一个场景（`Scene loaded: Start`）之后。
+
+   → v1.2.0 彻底移除 `TextField`，传送 Key 改用纯按钮组成的字符键盘；`OnGUI` 整体包
+   `try/catch`，连续异常两次就永久停止绘制，绝不再每帧弄脏 layout 栈。
+
+2. **旧版 `UnityEngine.Input` 在本游戏会直接抛异常**，所以 `F4`/`F5` 热键一直是死的，
+   并且每帧再刷一条错误：
+
+   ```
+   System.InvalidOperationException: You are trying to read Input using the
+   UnityEngine.Input class, but you have switched active Input handling to
+   Input System package in Player Settings.
+      at UnityEngine.Input.GetKeyDown(KeyCode key)
+      at QteTrainer.QteTrainerUi.Update()
+   ```
+
+   → v1.2.0 改用 `UnityEngine.InputSystem.Keyboard`（日志里 xmod 也打印了
+   `Initialized new InputSystem support.`，确认游戏用的是新输入系统），并且失败会
+   永久停用该后端，不再每帧刷日志。
+
+3. **所有功能默认就是开的，而且从第一帧起就生效**，包括自动跳对话
+   （`PlayableMachine.Update` → `NextText`）和 1.5 倍移速。
+
+   → v1.2.0 增加总开关 `Master/Enabled`（默认 false，每次启动强制重置），
+   所有 Harmony 补丁第一行都判 `QteTrainerPlugin.On`，总开关关闭时插件是彻底的 no-op。
+
+另外顺手修了一个一直静默失效的补丁：`InfoCreature.SetCurtHP/SetCurtRP` 的真实参数名是
+`v` 而不是 `value`，之前 HarmonyX 直接报
+`Parameter "value" not found in method void Game.InfoCreature::SetCurtHP(float v)`，
+所以「无限血 / 无限体力」从来没生效过。
+
 ## 注意事项
 
 - 若同时使用原 xmod 的移速倍率，两处倍率会相乘；关掉其中一个即可。
+- 热键名填 `UnityEngine.InputSystem.Key` 的枚举名，例如 `F8` / `F9` / `Insert` / `Home`。
+  改在 cfg 的 `Master/ToggleKey`、`Master/PanelKey`。
+- 万一热键在你的环境里完全不可用，把 cfg 里 `Master/EnableOnStart` 改成 `true`
+  可以让功能在启动时就打开（不推荐，这是黑屏的原始触发条件）。
 - 若游戏大版本更新导致方法名变化，需要用 `tools/il_dump.py` 重新核对
   `CompetitionForm`、`DredgeForm`、`CompetitionPlayer`、`DredgePlayer` 的方法名。
