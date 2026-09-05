@@ -11,7 +11,7 @@ using Game;
 
 namespace QteTrainer
 {
-    [BepInPlugin("arena.qte.trainer", "QTE / 万能 Trainer", "1.0.0")]
+    [BepInPlugin("arena.qte.trainer", "QTE / 万能 Trainer", "1.1.0")]
     public class QteTrainerPlugin : BasePlugin
     {
         public static QteTrainerPlugin Instance { get; private set; }
@@ -37,16 +37,35 @@ namespace QteTrainer
             MoveSpeedMul = Config.Bind("Helper", "MoveSpeedMul", 1.5f, "移动速度倍率");
             ShowUi = Config.Bind("UI", "ShowPanel", true, "显示训练器面板");
 
+            // Always create the component first so the in-game panel works even
+            // if one optional Harmony patch fails to install.
+            try { AddComponent<QteTrainerUi>(); } catch (Exception ex) { LogSource.LogError(ex); }
+
+            // Patch each class independently so a single bad patch cannot kill the plugin.
+            var harmony = new Harmony("arena.qte.trainer");
+            PatchClass<CompetitionForm_OnUpdate_Patch>(harmony);
+            PatchClass<CompetitionForm_RingMiss_Patch>(harmony);
+            PatchClass<CompetitionPlayer_Defeat_Patch>(harmony);
+            PatchClass<DredgeForm_OnUpdate_Patch>(harmony);
+            PatchClass<DredgePlayer_Defeat_Patch>(harmony);
+            PatchClass<InfoCreature_SetCurtHP_Patch>(harmony);
+            PatchClass<InfoCreature_SetCurtRP_Patch>(harmony);
+            PatchClass<Creature_TakeDamage_Patch>(harmony);
+            PatchClass<Creature_CurtMoveSpeed_Patch>(harmony);
+            PatchClass<PlayableMachine_Update_Patch>(harmony);
+
+            LogSource.LogInfo("QTE Trainer loaded.");
+        }
+
+        private static void PatchClass<T>(Harmony harmony) where T : class
+        {
             try
             {
-                var h = new Harmony("arena.qte.trainer");
-                h.PatchAll();
-                AddComponent<QteTrainerUi>();
-                LogSource.LogInfo("QTE Trainer loaded.");
+                harmony.PatchAll(typeof(T));
             }
             catch (Exception ex)
             {
-                LogSource.LogError(ex);
+                LogSource.LogWarning($"Patch {typeof(T).Name} failed, continuing: {ex.Message}");
             }
         }
     }
@@ -167,33 +186,31 @@ namespace QteTrainer
     }
 
     /* --------------------------------------------------------------------
-     * 通用优化
+     * 通用优化 - 无限血 / 无限体力
+     * 注意: 这里必须 patch 真实方法 InfoCreature.SetCurtHP/SetCurtRP,
+     *       不能 patch 属性 setter (IL2CPP field accessor 无法被 Harmony 补)。
      * -------------------------------------------------------------------- */
-    [HarmonyPatch(typeof(InfoCreature), "CurtHP", MethodType.Setter)]
-    public static class InfoCreature_CurtHP_Patch
+    [HarmonyPatch(typeof(InfoCreature), "SetCurtHP")]
+    public static class InfoCreature_SetCurtHP_Patch
     {
-        static bool Prefix(InfoCreature __instance, ref float value)
+        static void Prefix(InfoCreature __instance, ref float value)
         {
             if (QteTrainerPlugin.InfiniteHp.Value && __instance != null)
             {
                 value = __instance.MaxHP;
-                return true;
             }
-            return true;
         }
     }
 
-    [HarmonyPatch(typeof(Creature), "CurtRP", MethodType.Setter)]
-    public static class Creature_CurtRP_Patch
+    [HarmonyPatch(typeof(InfoCreature), "SetCurtRP")]
+    public static class InfoCreature_SetCurtRP_Patch
     {
-        static bool Prefix(Creature __instance, ref float value)
+        static void Prefix(InfoCreature __instance, ref float value)
         {
             if (QteTrainerPlugin.InfiniteEnergy.Value && __instance != null)
             {
                 value = __instance.CurtMaxRP;
-                return true;
             }
-            return true;
         }
     }
 
@@ -226,9 +243,9 @@ namespace QteTrainer
                 return;
             if (!__instance.IsPlaying)
                 return;
-            if (Time.time - _lastSkip < 0.08f)
+            if (UnityEngine.Time.time - _lastSkip < 0.08f)
                 return;
-            _lastSkip = Time.time;
+            _lastSkip = UnityEngine.Time.time;
             try { __instance.NextText(); } catch { }
         }
     }
