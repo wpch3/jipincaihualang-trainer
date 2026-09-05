@@ -2,6 +2,8 @@ using System;
 using System.Reflection;
 using System.Collections.Generic;
 using System.Collections;
+using System.IO;
+using System.Text;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
@@ -24,10 +26,17 @@ namespace QteTrainer
         public static ConfigEntry<bool> SkipDialogue;
         public static ConfigEntry<bool> InfiniteHp;
         public static ConfigEntry<bool> InfiniteEnergy;
+        public static ConfigEntry<bool> OneHitBreak;
         public static ConfigEntry<float> MoveSpeedMul;
         public static ConfigEntry<bool> ShowUi;
         public static ConfigEntry<int> AllItemCount;
         public static ConfigEntry<bool> AllItemsEnabled;
+        public static ConfigEntry<bool> InfiniteInventory;
+        public static ConfigEntry<int> MaxFavorStars;
+        public static ConfigEntry<string> TeleportKey;
+        public static ConfigEntry<string> TeleportPresetDock;
+        public static ConfigEntry<string> TeleportPresetSwamp;
+        public static ConfigEntry<string> TeleportPresetAltar;
 
         public override void Load()
         {
@@ -36,12 +45,19 @@ namespace QteTrainer
 
             QteAutoWin = Config.Bind("QTE", "AutoWin", true, "自动通过空格节奏/AD平衡两个小游戏");
             SkipDialogue = Config.Bind("Helper", "SkipDialogue", true, "自动推进对话/剧情");
-            InfiniteHp = Config.Bind("Combat", "InfiniteHp", true, "玩家无限生命");
-            InfiniteEnergy = Config.Bind("Combat", "InfiniteEnergy", true, "玩家无限体力/精力");
+            InfiniteHp = Config.Bind("Combat", "InfiniteHp", true, "玩家无限生命/无敌");
+            InfiniteEnergy = Config.Bind("Combat", "InfiniteEnergy", true, "玩家无限体力/精力(取消体力消耗)");
+            OneHitBreak = Config.Bind("Combat", "OneHitBreak", false, "一击破防: 非玩家目标被打时 HP 直接清 0");
             MoveSpeedMul = Config.Bind("Helper", "MoveSpeedMul", 1.5f, "移动速度倍率");
             ShowUi = Config.Bind("UI", "ShowPanel", true, "显示训练器面板");
             AllItemsEnabled = Config.Bind("Items", "GiveAllEnabled", true, "允许一键添加全部物品");
             AllItemCount = Config.Bind("Items", "GiveAllCount", 1, "一键添加全部物品时的每种物品数量");
+            InfiniteInventory = Config.Bind("Items", "InfiniteInventory", true, "物品数量不减(资源消耗不扣除)");
+            MaxFavorStars = Config.Bind("NPC", "MaxFavorStars", 5, "一键拉满NPC时设置为多少星");
+            TeleportKey = Config.Bind("Teleport", "Key", "", "快捷传送的锚点/传送点 Key(可在游戏内文本框中填写)");
+            TeleportPresetDock = Config.Bind("Teleport", "PresetDock", "", "码头预设传送 Key(留空则按钮提示未设置)");
+            TeleportPresetSwamp = Config.Bind("Teleport", "PresetSwamp", "", "黑沼泽预设传送 Key(留空则按钮提示未设置)");
+            TeleportPresetAltar = Config.Bind("Teleport", "PresetAltar", "", "祭坛/祭神台预设传送 Key(留空则按钮提示未设置)");
 
             // Always create the component first so the in-game panel works even
             // if one optional Harmony patch fails to install.
@@ -59,6 +75,8 @@ namespace QteTrainer
             PatchAll(harmony, typeof(Creature_TakeDamage_Patch));
             PatchAll(harmony, typeof(Creature_CurtMoveSpeed_Patch));
             PatchAll(harmony, typeof(PlayableMachine_Update_Patch));
+            PatchAll(harmony, typeof(Package_CutItem_Patch));
+            PatchAll(harmony, typeof(Commander_CmdRemoveItem_Patch));
 
             LogSource.LogInfo("QTE Trainer loaded.");
         }
@@ -91,6 +109,113 @@ namespace QteTrainer
             if (obj == null) return null;
             var p = obj.GetType().GetProperty("Item");
             return p?.GetValue(obj, new object[] { key });
+        }
+
+        private static object GetSingleton(Type type)
+        {
+            string[] candidates = { "Instance", "s_instance", "SInstance", "Main" };
+            foreach (var name in candidates)
+            {
+                try
+                {
+                    var p = type.GetProperty(name, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (p != null)
+                    {
+                        var v = p.GetValue(null);
+                        if (v != null) return v;
+                    }
+                }
+                catch { }
+                try
+                {
+                    var f = type.GetField(name, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (f != null)
+                    {
+                        var v = f.GetValue(null);
+                        if (v != null) return v;
+                    }
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        private static Commander GetCommander()
+        {
+            try { return Commander.Instance; }
+            catch { return null; }
+        }
+
+        private static object ReflectGetAny(object obj, Type declaring, string name)
+        {
+            object v = ReflectGet(obj, name);
+            if (v != null) return v;
+            try
+            {
+                var p = declaring.GetProperty(name, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                return p?.GetValue(null);
+            }
+            catch { return null; }
+        }
+
+        private static InfoCreature GetLocalInfo()
+        {
+            try
+            {
+                object pm = GetSingleton(typeof(PlayerMgr));
+                object lp = ReflectGetAny(pm, typeof(PlayerMgr), "LocalPlayer");
+                return ReflectGetAny(lp, typeof(Player), "Info") as InfoCreature;
+            }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"GetLocalInfo: {ex.Message}");
+                return null;
+            }
+        }
+
+        private static Creature GetLocalCrt()
+        {
+            try
+            {
+                object pm = GetSingleton(typeof(PlayerMgr));
+                return ReflectGetAny(pm, typeof(PlayerMgr), "LocalCrt") as Creature;
+            }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"GetLocalCrt: {ex.Message}");
+                return null;
+            }
+        }
+
+        public static bool IsLocalInfo(InfoCreature info)
+        {
+            if (info == null) return false;
+            try
+            {
+                var local = GetLocalInfo();
+                return local != null && ReferenceEquals(local, info);
+            }
+            catch { return false; }
+        }
+
+        public static bool IsLocalCrt(Creature crt)
+        {
+            if (crt == null) return false;
+            try
+            {
+                var local = GetLocalCrt();
+                return local != null && ReferenceEquals(local, crt);
+            }
+            catch { return false; }
+        }
+
+        public static bool HasLocalContext()
+        {
+            try
+            {
+                return GetLocalInfo() != null || GetLocalCrt() != null;
+            }
+            catch { return false; }
         }
 
         private static List<string> GetAllItemKeys()
@@ -162,7 +287,7 @@ namespace QteTrainer
                 return 0;
             }
             int added = 0;
-            var commander = Commander.Instance;
+            var commander = GetCommander();
             if (commander == null)
             {
                 QteTrainerPlugin.LogSource?.LogWarning("Commander.Instance is null.");
@@ -214,7 +339,7 @@ namespace QteTrainer
         {
             try
             {
-                var commander = Commander.Instance;
+                var commander = GetCommander();
                 if (commander != null) commander.CmdJumpTime(hours);
             }
             catch (Exception ex)
@@ -222,12 +347,179 @@ namespace QteTrainer
                 QteTrainerPlugin.LogSource?.LogWarning($"JumpTime: {ex.Message}");
             }
         }
+
+        private static string GetSelectedGirlKey()
+        {
+            try
+            {
+                var mfType = typeof(MainMenuForm);
+                var instanceProp = mfType.GetProperty("Instance", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                object mainMenu = instanceProp?.GetValue(null);
+                if (mainMenu == null) return null;
+                object page = ReflectGet(mainMenu, "CharInfoPage");
+                if (page == null) return null;
+                object current = ReflectGet(page, "m_Current");
+                if (current == null) return null;
+                var keyProp = current.GetType().GetProperty("Key", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                return keyProp?.GetValue(current)?.ToString();
+            }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"GetSelectedGirlKey: {ex.Message}");
+                return null;
+            }
+        }
+
+        public static void MaxSelectedNpc()
+        {
+            try
+            {
+                var key = GetSelectedGirlKey();
+                if (string.IsNullOrWhiteSpace(key))
+                {
+                    QteTrainerPlugin.LogSource?.LogWarning("没有选中的NPC，请先在角色/好感页面选中一个NPC。");
+                    return;
+                }
+                var commander = GetCommander();
+                if (commander == null) return;
+                int stars = QteTrainerPlugin.MaxFavorStars.Value;
+                if (stars < 0) stars = 0;
+                if (stars > 5) stars = 5;
+                commander.CmdSetNPCFavorStar(key, stars);
+                QteTrainerPlugin.LogSource?.LogInfo($"Set {key} favor star to {stars}.");
+            }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"MaxSelectedNpc: {ex.Message}");
+            }
+        }
+
+        public static void Teleport(string key)
+        {
+            key = (key ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                QteTrainerPlugin.LogSource?.LogWarning("请先填写传送 Key(锚点/传送点 Key)。");
+                return;
+            }
+            try
+            {
+                var commander = GetCommander();
+                if (commander == null)
+                {
+                    QteTrainerPlugin.LogSource?.LogWarning("Commander.Instance is null, 无法传送。");
+                    return;
+                }
+                commander.CmdPlayerTranslation(key);
+                QteTrainerPlugin.LogSource?.LogInfo($"Teleport requested: {key}");
+            }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"Teleport({key}): {ex.Message}");
+            }
+        }
+
+        public static string PresetPath
+        {
+            get
+            {
+                try { return Path.Combine(Paths.ConfigPath, "arena.qte.trainer.preset.txt"); }
+                catch { return "arena.qte.trainer.preset.txt"; }
+            }
+        }
+
+        public static void ExportPreset()
+        {
+            try
+            {
+                var sb = new StringBuilder();
+                sb.AppendLine("QteTrainerPreset 1.0");
+                sb.AppendLine("QteAutoWin=" + QteTrainerPlugin.QteAutoWin.Value);
+                sb.AppendLine("SkipDialogue=" + QteTrainerPlugin.SkipDialogue.Value);
+                sb.AppendLine("InfiniteHp=" + QteTrainerPlugin.InfiniteHp.Value);
+                sb.AppendLine("InfiniteEnergy=" + QteTrainerPlugin.InfiniteEnergy.Value);
+                sb.AppendLine("OneHitBreak=" + QteTrainerPlugin.OneHitBreak.Value);
+                sb.AppendLine("MoveSpeedMul=" + QteTrainerPlugin.MoveSpeedMul.Value.ToString("0.####"));
+                sb.AppendLine("AllItemsEnabled=" + QteTrainerPlugin.AllItemsEnabled.Value);
+                sb.AppendLine("AllItemCount=" + QteTrainerPlugin.AllItemCount.Value);
+                sb.AppendLine("InfiniteInventory=" + QteTrainerPlugin.InfiniteInventory.Value);
+                sb.AppendLine("MaxFavorStars=" + QteTrainerPlugin.MaxFavorStars.Value);
+                sb.AppendLine("TeleportKey=" + QteTrainerPlugin.TeleportKey.Value);
+                sb.AppendLine("TeleportPresetDock=" + QteTrainerPlugin.TeleportPresetDock.Value);
+                sb.AppendLine("TeleportPresetSwamp=" + QteTrainerPlugin.TeleportPresetSwamp.Value);
+                sb.AppendLine("TeleportPresetAltar=" + QteTrainerPlugin.TeleportPresetAltar.Value);
+                File.WriteAllText(PresetPath, sb.ToString());
+                QteTrainerPlugin.LogSource?.LogInfo($"配置已导出: {PresetPath}");
+            }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"ExportPreset: {ex.Message}");
+            }
+        }
+
+        public static void ImportPreset()
+        {
+            try
+            {
+                if (!File.Exists(PresetPath))
+                {
+                    QteTrainerPlugin.LogSource?.LogWarning($"未找到配置文件: {PresetPath}");
+                    return;
+                }
+                foreach (var raw in File.ReadAllLines(PresetPath))
+                {
+                    var line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith("#") || line.StartsWith("QteTrainerPreset"))
+                        continue;
+                    var idx = line.IndexOf('=');
+                    if (idx <= 0) continue;
+                    var key = line.Substring(0, idx).Trim();
+                    var value = line.Substring(idx + 1).Trim();
+
+                    void SetB(string target, ConfigEntry<bool> e) { if (key == target && bool.TryParse(value, out var v)) e.Value = v; }
+                    void SetI(string target, ConfigEntry<int> e) { if (key == target && int.TryParse(value, out var v)) e.Value = v; }
+                    void SetF(string target, ConfigEntry<float> e) { if (key == target && float.TryParse(value, out var v)) e.Value = v; }
+                    void SetS(string target, ConfigEntry<string> e) { if (key == target) e.Value = value; }
+
+                    SetB("QteAutoWin", QteTrainerPlugin.QteAutoWin);
+                    SetB("SkipDialogue", QteTrainerPlugin.SkipDialogue);
+                    SetB("InfiniteHp", QteTrainerPlugin.InfiniteHp);
+                    SetB("InfiniteEnergy", QteTrainerPlugin.InfiniteEnergy);
+                    SetB("OneHitBreak", QteTrainerPlugin.OneHitBreak);
+                    SetF("MoveSpeedMul", QteTrainerPlugin.MoveSpeedMul);
+                    SetB("AllItemsEnabled", QteTrainerPlugin.AllItemsEnabled);
+                    SetI("AllItemCount", QteTrainerPlugin.AllItemCount);
+                    SetB("InfiniteInventory", QteTrainerPlugin.InfiniteInventory);
+                    SetI("MaxFavorStars", QteTrainerPlugin.MaxFavorStars);
+                    SetS("TeleportKey", QteTrainerPlugin.TeleportKey);
+                    SetS("TeleportPresetDock", QteTrainerPlugin.TeleportPresetDock);
+                    SetS("TeleportPresetSwamp", QteTrainerPlugin.TeleportPresetSwamp);
+                    SetS("TeleportPresetAltar", QteTrainerPlugin.TeleportPresetAltar);
+                }
+                QteTrainerPlugin.LogSource?.LogInfo($"配置已导入: {PresetPath}");
+            }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"ImportPreset: {ex.Message}");
+            }
+        }
+
+        public static void SetAll(bool enabled)
+        {
+            QteTrainerPlugin.QteAutoWin.Value = enabled;
+            QteTrainerPlugin.SkipDialogue.Value = enabled;
+            QteTrainerPlugin.InfiniteHp.Value = enabled;
+            QteTrainerPlugin.InfiniteEnergy.Value = enabled;
+            QteTrainerPlugin.InfiniteInventory.Value = enabled;
+            QteTrainerPlugin.OneHitBreak.Value = enabled;
+        }
     }
 
     [RegisterInIl2Cpp]
     public class QteTrainerUi : MonoBehaviour
     {
         private bool show = true;
+        private string teleportInput = string.Empty;
 
         private void Update()
         {
@@ -235,6 +527,14 @@ namespace QteTrainer
                 show = !show;
             if (UnityEngine.Input.GetKeyDown(KeyCode.F6))
                 QteTrainerPlugin.ShowUi.Value = !QteTrainerPlugin.ShowUi.Value;
+            if (UnityEngine.Input.GetKeyDown(KeyCode.F4))
+                TrainerActions.SetAll(true);
+        }
+
+        private void EnsureTeleportInput()
+        {
+            if (string.IsNullOrEmpty(teleportInput) && !string.IsNullOrEmpty(QteTrainerPlugin.TeleportKey.Value))
+                teleportInput = QteTrainerPlugin.TeleportKey.Value;
         }
 
         private void OnGUI()
@@ -243,13 +543,17 @@ namespace QteTrainer
             if (!show)
                 return;
 
-            GUILayout.BeginArea(new Rect(8, 8, 330, 320));
+            EnsureTeleportInput();
+
+            GUILayout.BeginArea(new Rect(8, 8, 360, 460));
             GUILayout.Label("<b>QTE / 万能 Trainer</b>", GUI.skin.label);
 
             QteTrainerPlugin.QteAutoWin.Value = GUILayout.Toggle(QteTrainerPlugin.QteAutoWin.Value, "QTE 自动通关（空格节奏 + AD 平衡）");
-            QteTrainerPlugin.InfiniteHp.Value = GUILayout.Toggle(QteTrainerPlugin.InfiniteHp.Value, "无限生命");
-            QteTrainerPlugin.InfiniteEnergy.Value = GUILayout.Toggle(QteTrainerPlugin.InfiniteEnergy.Value, "无限体力/精力");
+            QteTrainerPlugin.InfiniteHp.Value = GUILayout.Toggle(QteTrainerPlugin.InfiniteHp.Value, "无限生命 / 无敌");
+            QteTrainerPlugin.InfiniteEnergy.Value = GUILayout.Toggle(QteTrainerPlugin.InfiniteEnergy.Value, "无限体力/精力（取消消耗）");
+            QteTrainerPlugin.OneHitBreak.Value = GUILayout.Toggle(QteTrainerPlugin.OneHitBreak.Value, "战斗破解：一击破防（敌人 HP 清零）");
             QteTrainerPlugin.SkipDialogue.Value = GUILayout.Toggle(QteTrainerPlugin.SkipDialogue.Value, "自动跳过对话/剧情");
+            QteTrainerPlugin.InfiniteInventory.Value = GUILayout.Toggle(QteTrainerPlugin.InfiniteInventory.Value, "物品数量不减");
 
             GUILayout.Label("移动速度倍率: " + QteTrainerPlugin.MoveSpeedMul.Value.ToString("F2"));
             QteTrainerPlugin.MoveSpeedMul.Value = GUILayout.HorizontalSlider(QteTrainerPlugin.MoveSpeedMul.Value, 0.1f, 10f);
@@ -265,6 +569,10 @@ namespace QteTrainer
                 int n = TrainerActions.AddAllItems(QteTrainerPlugin.AllItemCount.Value);
                 LogSource?.LogInfo($"Added {n} item stacks.");
             }
+            if (GUILayout.Button("拉满当前NPC好感/星星 (" + QteTrainerPlugin.MaxFavorStars.Value + "星)"))
+            {
+                TrainerActions.MaxSelectedNpc();
+            }
             if (GUILayout.Button("金钱设为 99999"))
             {
                 TrainerActions.SetGold(99999);
@@ -277,9 +585,48 @@ namespace QteTrainer
             {
                 TrainerActions.JumpTime(8f);
             }
-            GUILayout.Space(4);
+
+            GUILayout.Space(6);
+            GUILayout.Label("快捷传送(填游戏实际锚点/传送点 Key)");
+            GUILayout.BeginHorizontal();
+            teleportInput = GUILayout.TextField(teleportInput, 120);
+            if (GUILayout.Button("传送", GUILayout.Width(60)))
+            {
+                QteTrainerPlugin.TeleportKey.Value = teleportInput;
+                TrainerActions.Teleport(teleportInput);
+            }
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("码头") && !string.IsNullOrWhiteSpace(QteTrainerPlugin.TeleportPresetDock.Value))
+                TrainerActions.Teleport(QteTrainerPlugin.TeleportPresetDock.Value);
+            if (GUILayout.Button("黑沼泽") && !string.IsNullOrWhiteSpace(QteTrainerPlugin.TeleportPresetSwamp.Value))
+                TrainerActions.Teleport(QteTrainerPlugin.TeleportPresetSwamp.Value);
+            if (GUILayout.Button("祭坛") && !string.IsNullOrWhiteSpace(QteTrainerPlugin.TeleportPresetAltar.Value))
+                TrainerActions.Teleport(QteTrainerPlugin.TeleportPresetAltar.Value);
+            GUILayout.EndHorizontal();
+            if (string.IsNullOrWhiteSpace(QteTrainerPlugin.TeleportPresetDock.Value)
+                && string.IsNullOrWhiteSpace(QteTrainerPlugin.TeleportPresetSwamp.Value)
+                && string.IsNullOrWhiteSpace(QteTrainerPlugin.TeleportPresetAltar.Value))
+            {
+                GUILayout.Label("提示: 预设 Key 在 cfg 中设置后即可用；或在上面直接输入后传送。", GUI.skin.box);
+            }
+
+            GUILayout.Space(6);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("一键全开"))
+                TrainerActions.SetAll(true);
+            if (GUILayout.Button("一键全关"))
+                TrainerActions.SetAll(false);
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("导出配置"))
+                TrainerActions.ExportPreset();
+            if (GUILayout.Button("导入配置"))
+                TrainerActions.ImportPreset();
+            GUILayout.EndHorizontal();
+
             GUILayout.Label("全部实时开关并保存到 BepInEx/config/arena.qte.trainer.cfg");
-            GUILayout.Label("快捷键: F5 显示/隐藏面板");
+            GUILayout.Label("快捷键: F4 一键全开 / F5 显示/隐藏面板");
 
             GUILayout.EndArea();
         }
@@ -365,7 +712,7 @@ namespace QteTrainer
     }
 
     /* --------------------------------------------------------------------
-     * 通用优化 - 无限血 / 无限体力
+     * 通用优化 - 无限血 / 无限体力 / 一击破防
      * 注意: 这里必须 patch 真实方法 InfoCreature.SetCurtHP/SetCurtRP,
      *       不能 patch 属性 setter (IL2CPP field accessor 无法被 Harmony 补)。
      * -------------------------------------------------------------------- */
@@ -374,9 +721,21 @@ namespace QteTrainer
     {
         static void Prefix(InfoCreature __instance, ref float value)
         {
-            if (QteTrainerPlugin.InfiniteHp.Value && __instance != null)
+            if (__instance == null) return;
+            bool local = TrainerActions.IsLocalInfo(__instance);
+            bool hasLocal = TrainerActions.HasLocalContext();
+
+            // 无限血: 玩家保持满血；检测不到本地玩家时保守护全(维持旧版行为)。
+            if (QteTrainerPlugin.InfiniteHp.Value && (local || !hasLocal))
             {
                 value = __instance.MaxHP;
+                return;
+            }
+
+            // 敌人: 一击破防(HP清零)。检测不到本地玩家时不动手, 防止误杀玩家。
+            if (QteTrainerPlugin.OneHitBreak.Value && !local && hasLocal)
+            {
+                value = 0f;
             }
         }
     }
@@ -396,9 +755,24 @@ namespace QteTrainer
     [HarmonyPatch(typeof(Creature), "TakeDamage")]
     public static class Creature_TakeDamage_Patch
     {
-        static bool Prefix()
+        static bool Prefix(Creature __instance)
         {
-            return !QteTrainerPlugin.InfiniteHp.Value;
+            bool local = TrainerActions.IsLocalCrt(__instance);
+            bool hasLocal = TrainerActions.HasLocalContext();
+
+            // 玩家不受伤害
+            if (local && (QteTrainerPlugin.InfiniteHp.Value || QteTrainerPlugin.OneHitBreak.Value))
+                return false;
+
+            // 一击破防开且能识别本地玩家: 允许伤害进入 SetCurtHP -> 由 HP 补丁清零
+            if (!local && QteTrainerPlugin.OneHitBreak.Value && hasLocal)
+                return true;
+
+            // 无限血但未开一击破防时(或无法识别本地玩家), 连怪也不掉血(最保守/旧版行为)
+            if (QteTrainerPlugin.InfiniteHp.Value && (!local || !hasLocal))
+                return false;
+
+            return true;
         }
     }
 
@@ -426,6 +800,24 @@ namespace QteTrainer
                 return;
             _lastSkip = UnityEngine.Time.time;
             try { __instance.NextText(); } catch { }
+        }
+    }
+
+    [HarmonyPatch(typeof(Package), "CutItem")]
+    public static class Package_CutItem_Patch
+    {
+        static bool Prefix()
+        {
+            return !QteTrainerPlugin.InfiniteInventory.Value;
+        }
+    }
+
+    [HarmonyPatch(typeof(Commander), "CmdRemoveItem")]
+    public static class Commander_CmdRemoveItem_Patch
+    {
+        static bool Prefix()
+        {
+            return !QteTrainerPlugin.InfiniteInventory.Value;
         }
     }
 }
