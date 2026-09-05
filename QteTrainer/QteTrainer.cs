@@ -209,7 +209,7 @@ namespace QteTrainer
         {
             if (QteTrainerPlugin.InfiniteEnergy.Value && __instance != null)
             {
-                value = __instance.CurtMaxRP;
+                value = __instance.MaxRP;
             }
         }
     }
