@@ -43,29 +43,29 @@ namespace QteTrainer
 
             // Patch each class independently so a single bad patch cannot kill the plugin.
             var harmony = new Harmony("arena.qte.trainer");
-            PatchClass<CompetitionForm_OnUpdate_Patch>(harmony);
-            PatchClass<CompetitionForm_RingMiss_Patch>(harmony);
-            PatchClass<CompetitionPlayer_Defeat_Patch>(harmony);
-            PatchClass<DredgeForm_OnUpdate_Patch>(harmony);
-            PatchClass<DredgePlayer_Defeat_Patch>(harmony);
-            PatchClass<InfoCreature_SetCurtHP_Patch>(harmony);
-            PatchClass<InfoCreature_SetCurtRP_Patch>(harmony);
-            PatchClass<Creature_TakeDamage_Patch>(harmony);
-            PatchClass<Creature_CurtMoveSpeed_Patch>(harmony);
-            PatchClass<PlayableMachine_Update_Patch>(harmony);
+            PatchAll(harmony, typeof(CompetitionForm_OnUpdate_Patch));
+            PatchAll(harmony, typeof(CompetitionForm_RingMiss_Patch));
+            PatchAll(harmony, typeof(CompetitionPlayer_Defeat_Patch));
+            PatchAll(harmony, typeof(DredgeForm_OnUpdate_Patch));
+            PatchAll(harmony, typeof(DredgePlayer_Defeat_Patch));
+            PatchAll(harmony, typeof(InfoCreature_SetCurtHP_Patch));
+            PatchAll(harmony, typeof(InfoCreature_SetCurtRP_Patch));
+            PatchAll(harmony, typeof(Creature_TakeDamage_Patch));
+            PatchAll(harmony, typeof(Creature_CurtMoveSpeed_Patch));
+            PatchAll(harmony, typeof(PlayableMachine_Update_Patch));
 
             LogSource.LogInfo("QTE Trainer loaded.");
         }
 
-        private static void PatchClass<T>(Harmony harmony) where T : class
+        private static void PatchAll(Harmony harmony, Type patchType)
         {
             try
             {
-                harmony.PatchAll(typeof(T));
+                harmony.PatchAll(patchType);
             }
             catch (Exception ex)
             {
-                LogSource.LogWarning($"Patch {typeof(T).Name} failed, continuing: {ex.Message}");
+                LogSource.LogWarning($"Patch {patchType.Name} failed, continuing: {ex.Message}");
             }
         }
     }
