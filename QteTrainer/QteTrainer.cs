@@ -567,7 +567,7 @@ namespace QteTrainer
             if (GUILayout.Button("添加全部物品"))
             {
                 int n = TrainerActions.AddAllItems(QteTrainerPlugin.AllItemCount.Value);
-                LogSource?.LogInfo($"Added {n} item stacks.");
+                QteTrainerPlugin.LogSource?.LogInfo($"Added {n} item stacks.");
             }
             if (GUILayout.Button("拉满当前NPC好感/星星 (" + QteTrainerPlugin.MaxFavorStars.Value + "星)"))
             {
