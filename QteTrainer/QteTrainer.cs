@@ -52,7 +52,7 @@ namespace QteTrainer
             ShowUi = Config.Bind("UI", "ShowPanel", true, "显示训练器面板");
             AllItemsEnabled = Config.Bind("Items", "GiveAllEnabled", true, "允许一键添加全部物品");
             AllItemCount = Config.Bind("Items", "GiveAllCount", 1, "一键添加全部物品时的每种物品数量");
-            InfiniteInventory = Config.Bind("Items", "InfiniteInventory", true, "物品数量不减(资源消耗不扣除)");
+            InfiniteInventory = Config.Bind("Items", "InfiniteInventory", false, "物品数量不减(资源消耗不扣除; 建议进入正常场景后再开启)");
             MaxFavorStars = Config.Bind("NPC", "MaxFavorStars", 5, "一键拉满NPC时设置为多少星");
             TeleportKey = Config.Bind("Teleport", "Key", "", "快捷传送的锚点/传送点 Key(可在游戏内文本框中填写)");
             TeleportPresetDock = Config.Bind("Teleport", "PresetDock", "", "码头预设传送 Key(留空则按钮提示未设置)");
@@ -75,6 +75,7 @@ namespace QteTrainer
             PatchAll(harmony, typeof(Creature_TakeDamage_Patch));
             PatchAll(harmony, typeof(Creature_CurtMoveSpeed_Patch));
             PatchAll(harmony, typeof(PlayableMachine_Update_Patch));
+            PatchAll(harmony, typeof(Package_RemoveItem_Patch));
             PatchAll(harmony, typeof(Package_CutItem_Patch));
             PatchAll(harmony, typeof(Commander_CmdRemoveItem_Patch));
 
@@ -96,6 +97,10 @@ namespace QteTrainer
 
     public static class TrainerActions
     {
+        private static InfoCreature _cachedLocalInfo;
+        private static Creature _cachedLocalCrt;
+        private static float _nextLocalRefresh = -1f;
+
         private static object ReflectGet(object obj, string name)
         {
             if (obj == null) return null;
@@ -187,13 +192,27 @@ namespace QteTrainer
             }
         }
 
+        // 战斗补丁每帧会被高频调用, 必须缓存本地玩家引用, 避免每帧反射导致卡死/黑屏。
+        private static void RefreshLocalReferences()
+        {
+            if (UnityEngine.Time.time < _nextLocalRefresh)
+                return;
+            _nextLocalRefresh = UnityEngine.Time.time + 0.5f;
+            try
+            {
+                _cachedLocalInfo = GetLocalInfo();
+                _cachedLocalCrt = GetLocalCrt();
+            }
+            catch { }
+        }
+
         public static bool IsLocalInfo(InfoCreature info)
         {
             if (info == null) return false;
             try
             {
-                var local = GetLocalInfo();
-                return local != null && ReferenceEquals(local, info);
+                RefreshLocalReferences();
+                return _cachedLocalInfo != null && ReferenceEquals(_cachedLocalInfo, info);
             }
             catch { return false; }
         }
@@ -203,8 +222,8 @@ namespace QteTrainer
             if (crt == null) return false;
             try
             {
-                var local = GetLocalCrt();
-                return local != null && ReferenceEquals(local, crt);
+                RefreshLocalReferences();
+                return _cachedLocalCrt != null && ReferenceEquals(_cachedLocalCrt, crt);
             }
             catch { return false; }
         }
@@ -213,7 +232,8 @@ namespace QteTrainer
         {
             try
             {
-                return GetLocalInfo() != null || GetLocalCrt() != null;
+                RefreshLocalReferences();
+                return _cachedLocalInfo != null || _cachedLocalCrt != null;
             }
             catch { return false; }
         }
@@ -721,22 +741,26 @@ namespace QteTrainer
     {
         static void Prefix(InfoCreature __instance, ref float value)
         {
-            if (__instance == null) return;
-            bool local = TrainerActions.IsLocalInfo(__instance);
-            bool hasLocal = TrainerActions.HasLocalContext();
-
-            // 无限血: 玩家保持满血；检测不到本地玩家时保守护全(维持旧版行为)。
-            if (QteTrainerPlugin.InfiniteHp.Value && (local || !hasLocal))
+            try
             {
-                value = __instance.MaxHP;
-                return;
-            }
+                if (__instance == null) return;
+                bool local = TrainerActions.IsLocalInfo(__instance);
+                bool hasLocal = TrainerActions.HasLocalContext();
 
-            // 敌人: 一击破防(HP清零)。检测不到本地玩家时不动手, 防止误杀玩家。
-            if (QteTrainerPlugin.OneHitBreak.Value && !local && hasLocal)
-            {
-                value = 0f;
+                // 无限血: 玩家保持满血；检测不到本地玩家时保守护全(维持旧版行为)。
+                if (QteTrainerPlugin.InfiniteHp.Value && (local || !hasLocal))
+                {
+                    value = __instance.MaxHP;
+                    return;
+                }
+
+                // 敌人: 一击破防(HP清零)。检测不到本地玩家时不动手, 防止误杀玩家。
+                if (QteTrainerPlugin.OneHitBreak.Value && !local && hasLocal)
+                {
+                    value = 0f;
+                }
             }
+            catch { }
         }
     }
 
@@ -757,20 +781,24 @@ namespace QteTrainer
     {
         static bool Prefix(Creature __instance)
         {
-            bool local = TrainerActions.IsLocalCrt(__instance);
-            bool hasLocal = TrainerActions.HasLocalContext();
+            try
+            {
+                bool local = TrainerActions.IsLocalCrt(__instance);
+                bool hasLocal = TrainerActions.HasLocalContext();
 
-            // 玩家不受伤害
-            if (local && (QteTrainerPlugin.InfiniteHp.Value || QteTrainerPlugin.OneHitBreak.Value))
-                return false;
+                // 玩家不受伤害
+                if (local && (QteTrainerPlugin.InfiniteHp.Value || QteTrainerPlugin.OneHitBreak.Value))
+                    return false;
 
-            // 一击破防开且能识别本地玩家: 允许伤害进入 SetCurtHP -> 由 HP 补丁清零
-            if (!local && QteTrainerPlugin.OneHitBreak.Value && hasLocal)
-                return true;
+                // 一击破防开且能识别本地玩家: 允许伤害进入 SetCurtHP -> 由 HP 补丁清零
+                if (!local && QteTrainerPlugin.OneHitBreak.Value && hasLocal)
+                    return true;
 
-            // 无限血但未开一击破防时(或无法识别本地玩家), 连怪也不掉血(最保守/旧版行为)
-            if (QteTrainerPlugin.InfiniteHp.Value && (!local || !hasLocal))
-                return false;
+                // 无限血但未开一击破防时(或无法识别本地玩家), 连怪也不掉血(最保守/旧版行为)
+                if (QteTrainerPlugin.InfiniteHp.Value && (!local || !hasLocal))
+                    return false;
+            }
+            catch { }
 
             return true;
         }
@@ -803,21 +831,107 @@ namespace QteTrainer
         }
     }
 
+    /* --------------------------------------------------------------------
+     * 无限背包 / 物品数量不减
+     * 注意: 不能直接跳过原方法(会让正常初始化/任务流程卡死或黑屏),
+     *       而是让原方法照常执行, 随后再把扣掉的数量加回来。
+     * -------------------------------------------------------------------- */
+    [HarmonyPatch(typeof(Package), "RemoveItem")]
+    public static class Package_RemoveItem_Patch
+    {
+        static void Postfix(object[] __args)
+        {
+            try
+            {
+                if (!QteTrainerPlugin.InfiniteInventory.Value || __args == null || __args.Length < 2)
+                    return;
+                string key = __args[0] as string;
+                int count = Convert.ToInt32(__args[1]);
+                if (string.IsNullOrEmpty(key) || count <= 0) return;
+                var c = Commander.Instance;
+                if (c != null) c.CmdAddItem(key, count);
+            }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"Restore RemoveItem: {ex.Message}");
+            }
+        }
+    }
+
     [HarmonyPatch(typeof(Package), "CutItem")]
     public static class Package_CutItem_Patch
     {
-        static bool Prefix()
+        static void Prefix(object[] __args, out string __state)
         {
-            return !QteTrainerPlugin.InfiniteInventory.Value;
+            __state = null;
+            try
+            {
+                if (!QteTrainerPlugin.InfiniteInventory.Value || __args == null || __args.Length < 1)
+                    return;
+                var item = __args[0] as Item;
+                if (item == null) return;
+                var info = item.Info;
+                if (info != null && info.Count > 0)
+                    __state = info.Id + "|" + info.Count;
+            }
+            catch { }
+        }
+
+        static void Postfix(string __state)
+        {
+            if (string.IsNullOrEmpty(__state))
+                return;
+            try
+            {
+                int split = __state.IndexOf('|');
+                if (split <= 0) return;
+                string key = __state.Substring(0, split);
+                int count = int.Parse(__state.Substring(split + 1));
+                if (!QteTrainerPlugin.InfiniteInventory.Value || count <= 0 || string.IsNullOrEmpty(key))
+                    return;
+                var c = Commander.Instance;
+                if (c != null) c.CmdAddItem(key, count);
+            }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"Restore CutItem: {ex.Message}");
+            }
         }
     }
 
     [HarmonyPatch(typeof(Commander), "CmdRemoveItem")]
     public static class Commander_CmdRemoveItem_Patch
     {
-        static bool Prefix()
+        static void Prefix(object[] __args, out bool __state)
         {
-            return !QteTrainerPlugin.InfiniteInventory.Value;
+            __state = false;
+            try
+            {
+                if (!QteTrainerPlugin.InfiniteInventory.Value || __args == null || __args.Length < 2)
+                    return;
+                string key = __args[0] as string;
+                int count = Convert.ToInt32(__args[1]);
+                __state = !string.IsNullOrEmpty(key) && count > 0;
+            }
+            catch { }
+        }
+
+        static void Postfix(object[] __args, bool __state)
+        {
+            if (!__state || __args == null || __args.Length < 2)
+                return;
+            try
+            {
+                string key = __args[0] as string;
+                int count = Convert.ToInt32(__args[1]);
+                if (string.IsNullOrEmpty(key) || count <= 0) return;
+                var c = Commander.Instance;
+                if (c != null) c.CmdAddItem(key, count);
+            }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"Restore CmdRemoveItem: {ex.Message}");
+            }
         }
     }
 }
