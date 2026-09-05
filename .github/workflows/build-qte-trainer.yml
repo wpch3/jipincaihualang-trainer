@@ -1,7 +1,30 @@
-# Run from the repo root on Windows with .NET 6 SDK installed:
-#   powershell -ExecutionPolicy Bypass -File QteTrainer\build-locally.ps1
-$ErrorActionPreference = "Stop"
-dotnet build "QteTrainer\QteTrainer.csproj" -c Release
-$out = "QteTrainer\bin\Release\net6.0\QteTrainer.dll"
-Write-Host "Built: $out"
-Write-Host "Copy it to BepInEx\plugins\QteTrainer\ (or xmod folder if you keep this alongside FlowerPicker)."
+name: Build QteTrainer
+
+on:
+  push:
+    paths:
+      - 'QteTrainer/**'
+      - '.github/workflows/build-qte-trainer.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Build
+        run: dotnet build QteTrainer/QteTrainer.csproj -c Release -p:ContinuousIntegrationBuild=false
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: QteTrainer
+          path: |
+            QteTrainer/bin/Release/net6.0/QteTrainer.dll
