@@ -51,6 +51,10 @@
       <HintPath>..\BepInEx\interop\Il2CppSystem.Core.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="UnityGameFramework.Runtime">
+      <HintPath>..\BepInEx\interop\UnityGameFramework.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="Il2CppInterop.HarmonySupport">
       <HintPath>..\BepInEx\core\Il2CppInterop.HarmonySupport.dll</HintPath>
       <Private>false</Private>
