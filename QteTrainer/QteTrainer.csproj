@@ -39,6 +39,18 @@
       <HintPath>..\BepInEx\core\Il2CppInterop.Runtime.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="Il2Cppmscorlib">
+      <HintPath>..\BepInEx\interop\Il2Cppmscorlib.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2CppSystem">
+      <HintPath>..\BepInEx\interop\Il2CppSystem.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2CppSystem.Core">
+      <HintPath>..\BepInEx\interop\Il2CppSystem.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="Il2CppInterop.HarmonySupport">
       <HintPath>..\BepInEx\core\Il2CppInterop.HarmonySupport.dll</HintPath>
       <Private>false</Private>
