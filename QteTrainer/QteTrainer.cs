@@ -1,5 +1,7 @@
 using System;
 using System.Reflection;
+using System.Collections.Generic;
+using System.Collections;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
@@ -24,6 +26,8 @@ namespace QteTrainer
         public static ConfigEntry<bool> InfiniteEnergy;
         public static ConfigEntry<float> MoveSpeedMul;
         public static ConfigEntry<bool> ShowUi;
+        public static ConfigEntry<int> AllItemCount;
+        public static ConfigEntry<bool> AllItemsEnabled;
 
         public override void Load()
         {
@@ -36,6 +40,8 @@ namespace QteTrainer
             InfiniteEnergy = Config.Bind("Combat", "InfiniteEnergy", true, "玩家无限体力/精力");
             MoveSpeedMul = Config.Bind("Helper", "MoveSpeedMul", 1.5f, "移动速度倍率");
             ShowUi = Config.Bind("UI", "ShowPanel", true, "显示训练器面板");
+            AllItemsEnabled = Config.Bind("Items", "GiveAllEnabled", true, "允许一键添加全部物品");
+            AllItemCount = Config.Bind("Items", "GiveAllCount", 1, "一键添加全部物品时的每种物品数量");
 
             // Always create the component first so the in-game panel works even
             // if one optional Harmony patch fails to install.
@@ -66,6 +72,154 @@ namespace QteTrainer
             catch (Exception ex)
             {
                 LogSource.LogWarning($"Patch {patchType.Name} failed, continuing: {ex.Message}");
+            }
+        }
+    }
+
+    public static class TrainerActions
+    {
+        private static object ReflectGet(object obj, string name)
+        {
+            if (obj == null) return null;
+            var t = obj.GetType();
+            var p = t.GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            return p?.GetValue(obj);
+        }
+
+        private static object ReflectIndex(object obj, object key)
+        {
+            if (obj == null) return null;
+            var p = obj.GetType().GetProperty("Item");
+            return p?.GetValue(obj, new object[] { key });
+        }
+
+        private static List<string> GetAllItemKeys()
+        {
+            var result = new List<string>();
+            try
+            {
+                var mgrType = typeof(ProtoMgr);
+                var instProp = mgrType.GetProperty("Instance", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                if (instProp == null)
+                {
+                    // Some Il2Cpp singleton implementations expose it through the generic base type as well.
+                    instProp = mgrType.BaseType?.GetProperty("Instance", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                }
+                object mgr = instProp?.GetValue(null);
+                if (mgr == null) return result;
+
+                object members = ReflectGet(mgr, "Members");
+                if (members == null) return result;
+
+                // Find the entry whose key's ToString ends with ProtoItem.
+                object membersKeys = ReflectGet(members, "Keys");
+                object itemMember = null;
+                if (membersKeys is IEnumerable enumKeys)
+                {
+                    var e = enumKeys.GetEnumerator();
+                    while (e.MoveNext())
+                    {
+                        object k = e.Current;
+                        string name = k?.ToString() ?? string.Empty;
+                        if (name.IndexOf("ProtoItem", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            itemMember = ReflectIndex(members, k);
+                            break;
+                        }
+                    }
+                }
+                if (itemMember == null) return result;
+
+                object keyMap = ReflectGet(itemMember, "KeyMap");
+                if (keyMap == null) return result;
+
+                object keysObj = ReflectGet(keyMap, "Keys");
+                if (keysObj is IEnumerable keyEnum)
+                {
+                    var e = keyEnum.GetEnumerator();
+                    while (e.MoveNext())
+                    {
+                        string key = e.Current?.ToString() ?? string.Empty;
+                        if (!string.IsNullOrWhiteSpace(key))
+                            result.Add(key);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"GetAllItemKeys: {ex.Message}");
+            }
+            return result;
+        }
+
+        public static int AddAllItems(int countPerItem)
+        {
+            if (countPerItem < 1) countPerItem = 1;
+            var keys = GetAllItemKeys();
+            if (keys.Count == 0)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning("No item keys were found.");
+                return 0;
+            }
+            int added = 0;
+            var commander = Commander.Instance;
+            if (commander == null)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning("Commander.Instance is null.");
+                return 0;
+            }
+            foreach (var key in keys)
+            {
+                try
+                {
+                    commander.CmdAddItem(key, countPerItem);
+                    added++;
+                }
+                catch (Exception ex)
+                {
+                    QteTrainerPlugin.LogSource?.LogWarning($"Add item {key} failed: {ex.Message}");
+                }
+            }
+            return added;
+        }
+
+        public static void SetGold(int amount)
+        {
+            try
+            {
+                var pkg = Package.Instance;
+                if (pkg == null || pkg.m_Gold == null) return;
+                pkg.m_Gold.Count = amount;
+            }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"SetGold: {ex.Message}");
+            }
+        }
+
+        public static void AddExp(int amount)
+        {
+            try
+            {
+                var cur = RecordData.Current;
+                if (cur != null) cur.IncreTrainEXP(amount);
+            }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"AddExp: {ex.Message}");
+            }
+        }
+
+        public static void JumpTime(float hours)
+        {
+            try
+            {
+                var commander = Commander.Instance;
+                if (commander != null) commander.CmdJumpTime(hours);
+            }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"JumpTime: {ex.Message}");
             }
         }
     }
@@ -101,7 +255,32 @@ namespace QteTrainer
             QteTrainerPlugin.MoveSpeedMul.Value = GUILayout.HorizontalSlider(QteTrainerPlugin.MoveSpeedMul.Value, 0.1f, 10f);
 
             GUILayout.Space(6);
+            GUILayout.Label("一键全物品 - 数量: " + QteTrainerPlugin.AllItemCount.Value);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("-")) QteTrainerPlugin.AllItemCount.Value = Math.Max(1, QteTrainerPlugin.AllItemCount.Value - 1);
+            if (GUILayout.Button("+")) QteTrainerPlugin.AllItemCount.Value = Math.Min(9999, QteTrainerPlugin.AllItemCount.Value + 1);
+            GUILayout.EndHorizontal();
+            if (GUILayout.Button("添加全部物品"))
+            {
+                int n = TrainerActions.AddAllItems(QteTrainerPlugin.AllItemCount.Value);
+                LogSource?.LogInfo($"Added {n} item stacks.");
+            }
+            if (GUILayout.Button("金钱设为 99999"))
+            {
+                TrainerActions.SetGold(99999);
+            }
+            if (GUILayout.Button("训练经验 +10000"))
+            {
+                TrainerActions.AddExp(10000);
+            }
+            if (GUILayout.Button("时间 +8 小时"))
+            {
+                TrainerActions.JumpTime(8f);
+            }
+            GUILayout.Space(4);
+            GUILayout.Label("全部实时开关并保存到 BepInEx/config/arena.qte.trainer.cfg");
             GUILayout.Label("快捷键: F5 显示/隐藏面板");
+
             GUILayout.EndArea();
         }
     }
