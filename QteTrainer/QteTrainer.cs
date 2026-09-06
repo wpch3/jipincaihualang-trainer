@@ -28,6 +28,10 @@ namespace QteTrainer
         public static ConfigEntry<string> ToggleKey;
         public static ConfigEntry<string> PanelKey;
         public static ConfigEntry<string> AddItemsKey;
+        public static ConfigEntry<string> CursorKey;
+        public static ConfigEntry<string> UnlockBuildKey;
+        public static ConfigEntry<string> TpNextBuildKey;
+        public static ConfigEntry<string> TpPrevBuildKey;
         public static ConfigEntry<bool> QteAutoWin;
         public static ConfigEntry<bool> SkipDialogue;
         public static ConfigEntry<bool> InfiniteHp;
@@ -72,6 +76,15 @@ namespace QteTrainer
             AddItemsKey = Config.Bind("Master", "AddItemsKey", "F10",
                 "一键添加全部物品的热键。游戏进行中(不需要鼠标/暂停菜单)直接按就能触发, " +
                 "每种物品的数量用面板「功能」页的 +/- 或 cfg 里 Items/GiveAllCount 设置。");
+            CursorKey = Config.Bind("Master", "CursorKey", "F7",
+                "游戏进行中显示/解锁鼠标的热键。开启后每帧把 Cursor.lockState 拉回 None、" +
+                "Cursor.visible 拉回 true, 这样面板上的按钮在游戏进行中也能点。");
+            UnlockBuildKey = Config.Bind("Master", "UnlockBuildKey", "F11",
+                "一键解锁全部办事地点的热键(不需要鼠标)。");
+            TpNextBuildKey = Config.Bind("Master", "TpNextBuildKey", "F12",
+                "传送到下一个办事地点的热键(在办事地点列表里循环, 不需要鼠标)。");
+            TpPrevBuildKey = Config.Bind("Master", "TpPrevBuildKey", "F6",
+                "传送到上一个办事地点的热键(在办事地点列表里循环, 不需要鼠标)。");
 
             QteAutoWin = Config.Bind("QTE", "AutoWin", false, "自动通过空格节奏/AD平衡两个小游戏");
             SkipDialogue = Config.Bind("Helper", "SkipDialogue", false, "自动推进对话/剧情");
@@ -159,6 +172,13 @@ namespace QteTrainer
         }
 
 
+        // 注意: 必须带 BindingFlags.FlattenHierarchy。
+        // 这个游戏的单例都是 Game.Singleton`1<T> / Game.SingletonMono`1<T> 的泛型基类,
+        // Instance 声明在基类上。反射查"继承来的静态成员"不带 FlattenHierarchy 就返回 null ——
+        // 这正是"添加全物品"和"坐标传送"先后失效的同一个根因。
+        private const BindingFlags StaticAny =
+            BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.FlattenHierarchy;
+
         private static object GetSingleton(Type type)
         {
             string[] candidates = { "Instance", "s_instance", "SInstance", "Main" };
@@ -166,7 +186,7 @@ namespace QteTrainer
             {
                 try
                 {
-                    var p = type.GetProperty(name, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                    var p = type.GetProperty(name, StaticAny);
                     if (p != null)
                     {
                         var v = p.GetValue(null);
@@ -176,11 +196,25 @@ namespace QteTrainer
                 catch { }
                 try
                 {
-                    var f = type.GetField(name, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                    var f = type.GetField(name, StaticAny);
                     if (f != null)
                     {
                         var v = f.GetValue(null);
                         if (v != null) return v;
+                    }
+                }
+                catch { }
+                // 再退一步: 手动往基类链上找。
+                try
+                {
+                    for (var t = type.BaseType; t != null; t = t.BaseType)
+                    {
+                        var p = t.GetProperty(name, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+                        if (p != null)
+                        {
+                            var v = p.GetValue(null);
+                            if (v != null) return v;
+                        }
                     }
                 }
                 catch { }
@@ -206,17 +240,48 @@ namespace QteTrainer
             catch { return null; }
         }
 
+        // PlayerMgr : Game.SingletonMono`1<PlayerMgr>, 所以直接用强类型 PlayerMgr.Instance,
+        // 不要再靠 GetSingleton 反射(那条路曾经因为缺 FlattenHierarchy 而恒为 null,
+        // 导致坐标传送报 "拿不到本地玩家 Creature")。
+        private static PlayerMgr GetPlayerMgr()
+        {
+            try { return PlayerMgr.Instance; }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"PlayerMgr.Instance 读取失败: {ex.GetType().Name}: {ex.Message}");
+                return null;
+            }
+        }
+
         private static InfoCreature GetLocalInfo()
         {
             try
             {
-                object pm = GetSingleton(typeof(PlayerMgr));
-                object lp = ReflectGetAny(pm, typeof(PlayerMgr), "LocalPlayer");
-                return ReflectGetAny(lp, typeof(Player), "Info") as InfoCreature;
+                var pm = GetPlayerMgr();
+                if (pm == null) return null;
+                // 1) PlayerMgr.LocalCrt.Info
+                try
+                {
+                    var crt = pm.LocalCrt;
+                    if (crt != null)
+                    {
+                        var info = crt.Info as InfoCreature;
+                        if (info != null) return info;
+                    }
+                }
+                catch { }
+                // 2) PlayerMgr.LocalPlayer.Info
+                try
+                {
+                    var lp = pm.LocalPlayer;
+                    if (lp != null) return lp.Info as InfoCreature;
+                }
+                catch { }
+                return null;
             }
             catch (Exception ex)
             {
-                QteTrainerPlugin.LogSource?.LogWarning($"GetLocalInfo: {ex.Message}");
+                QteTrainerPlugin.LogSource?.LogWarning($"GetLocalInfo: {ex.GetType().Name}: {ex.Message}");
                 return null;
             }
         }
@@ -225,12 +290,27 @@ namespace QteTrainer
         {
             try
             {
-                object pm = GetSingleton(typeof(PlayerMgr));
-                return ReflectGetAny(pm, typeof(PlayerMgr), "LocalCrt") as Creature;
+                var pm = GetPlayerMgr();
+                if (pm == null) return null;
+                // 1) PlayerMgr.LocalCrt
+                try
+                {
+                    var crt = pm.LocalCrt;
+                    if (crt != null) return crt;
+                }
+                catch { }
+                // 2) PlayerMgr.LocalPlayer.Crt
+                try
+                {
+                    var lp = pm.LocalPlayer;
+                    if (lp != null) return lp.Crt;
+                }
+                catch { }
+                return null;
             }
             catch (Exception ex)
             {
-                QteTrainerPlugin.LogSource?.LogWarning($"GetLocalCrt: {ex.Message}");
+                QteTrainerPlugin.LogSource?.LogWarning($"GetLocalCrt: {ex.GetType().Name}: {ex.Message}");
                 return null;
             }
         }
@@ -371,6 +451,29 @@ namespace QteTrainer
         /// 再用 EnumerateAny 枚举, 和 xmod 的做法一致。
         /// </summary>
         /// <summary>
+        /// 取一个 Il2CppSystem.Type 的真实全名。
+        /// 不能用 ToString(): Il2CppInterop 的 Type 包装类没有 override 托管 ToString(),
+        /// 用 object 引用调它会得到 "Il2CppSystem.Type"(log4 里的 Key 样本就是这么来的)。
+        /// </summary>
+        private static string TypeName(object typeObj)
+        {
+            if (typeObj == null) return string.Empty;
+            try
+            {
+                var t = typeObj.GetType();
+                foreach (var name in new[] { "FullName", "Name" })
+                {
+                    var p = t.GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (p == null) continue;
+                    var v = p.GetValue(typeObj, null) as string;
+                    if (!string.IsNullOrEmpty(v)) return v;
+                }
+            }
+            catch { }
+            return string.Empty;
+        }
+
+        /// <summary>
         /// 只看 KeyMap 的**第一个**元素, 判断它的 Value 是不是 Game.ProtoItem。
         /// 用 FirstOf 而不是 EnumerateAny, 免得为了探测把一个上千条的表整个枚举一遍。
         /// </summary>
@@ -461,54 +564,85 @@ namespace QteTrainer
                     return result;
                 }
 
-                // Members 是 Dictionary<Type, ProtoMgr+Member>。
+                // Members 是 Dictionary<Il2CppSystem.Type, ProtoMgr+Member>。
                 //
-                // 上一版按 Key.ToString() 去匹配 "Game.ProtoItem", 实测失败:
-                //   ProtoMgr.Members 里没找到 Game.ProtoItem(共 120 项)
-                // 也就是 120 项都枚举到了, 但 Key(Il2CppSystem.Type) 的 ToString() 并不是
-                // "Game.ProtoItem" 这种形式, 所以字符串匹配靠不住。
+                // 前两版都在这里栽了:
+                //   v1.3.0 按 Key.ToString() 匹配 "Game.ProtoItem"  -> 120 项全不中
+                //   v1.4.0 按 KeyMap 的值类型认                    -> 也全不中
+                // log4 给出了答案: Key 样本打印出来是 "Il2CppSystem.Type" ×6,
+                // 也就是 ToString() 返回的是**托管包装类自己的名字**, 不是原生类型的全名。
+                // Il2CppInterop 生成的 Type 包装类没有 override 托管的 ToString(),
+                // 用 object 引用调 ToString() 就落到 System.Object.ToString() 上了。
                 //
-                // 现在改成按 **值类型** 认: 逐个 Member 取 KeyMap 的第一个元素,
-                // 看它的 Value 是不是 Game.ProtoItem。这个判据不依赖任何字符串格式。
+                // xmod 的做法(FlowerPicker.dll -> <SetupCoroutine>d__3::MoveNext 的 IL)是:
+                //     call     Game.ProtoMgr::get_Instance
+                //     callvirt Game.ProtoMgr::get_Members
+                //     ldstr    "Game.ProtoItem"
+                //     call     Il2CppSystem.Type::GetType        <-- 关键
+                //     callvirt ContainsKey / get_Item
+                //     callvirt Member::get_KeyMap
+                // 现在照抄: 直接把 "Game.ProtoItem" 变成 Il2CppSystem.Type 去索引字典。
                 object itemMember = null;
                 object keyMap = null;
                 int memberCount = 0;
                 var keySamples = new List<string>();
                 string matchedBy = null;
 
-                foreach (var pair in EnumerateAny(members))
+                // --- 路径 A: 直接用 Il2CppSystem.Type.GetType("Game.ProtoItem") 索引 ---
+                try
                 {
-                    memberCount++;
-                    object k = PairPart(pair, "Key");
-                    string name = k?.ToString() ?? string.Empty;
-                    if (keySamples.Count < 6) keySamples.Add(string.IsNullOrEmpty(name) ? "(空)" : name);
-
-                    object v = PairPart(pair, "Value");
-                    if (v == null) continue;
-
-                    // 1) 名字匹配(命中就最省事)
-                    if (itemMember == null
-                        && name.IndexOf("ProtoItem", StringComparison.OrdinalIgnoreCase) >= 0)
+                    var itemType = Il2CppSystem.Type.GetType("Game.ProtoItem");
+                    if (itemType != null)
                     {
-                        itemMember = v;
-                        matchedBy = "name:" + name;
-                        break;
+                        var itemProp = members.GetType().GetProperty("Item");
+                        if (itemProp != null)
+                            itemMember = itemProp.GetValue(members, new object[] { itemType });
+                        if (itemMember != null)
+                        {
+                            keyMap = ReflectGet(itemMember, "KeyMap");
+                            matchedBy = "Il2CppSystem.Type.GetType(\"Game.ProtoItem\") 直接索引";
+                        }
                     }
-
-                    // 2) 值类型匹配
-                    if (itemMember == null && KeyMapHoldsProtoItem(v, out object probeMap))
+                    else
                     {
-                        itemMember = v;
-                        keyMap = probeMap;
-                        matchedBy = "value type = Game.ProtoItem";
-                        break;
+                        QteTrainerPlugin.LogSource?.LogWarning(
+                            "Il2CppSystem.Type.GetType(\"Game.ProtoItem\") 返回 null。");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    QteTrainerPlugin.LogSource?.LogWarning(
+                        $"路径A(Type.GetType 索引)失败: {ex.GetType().Name}: {ex.Message}");
+                }
+
+                // --- 路径 B: 枚举, 但用 FullName/Name 而不是 ToString() ---
+                if (itemMember == null)
+                {
+                    foreach (var pair in EnumerateAny(members))
+                    {
+                        memberCount++;
+                        object k = PairPart(pair, "Key");
+                        string name = TypeName(k);
+                        if (keySamples.Count < 6) keySamples.Add(string.IsNullOrEmpty(name) ? "(空)" : name);
+
+                        if (name.IndexOf("ProtoItem", StringComparison.OrdinalIgnoreCase) < 0)
+                            continue;
+
+                        itemMember = PairPart(pair, "Value");
+                        if (itemMember != null)
+                        {
+                            keyMap = ReflectGet(itemMember, "KeyMap");
+                            matchedBy = "枚举 + FullName 匹配: " + name;
+                            break;
+                        }
                     }
                 }
 
                 if (itemMember == null)
                 {
+                    if (memberCount == 0) memberCount = EnumerateAny(members).Count;
                     QteTrainerPlugin.LogSource?.LogWarning(
-                        $"ProtoMgr.Members 里没找到物品表(共 {memberCount} 项)。Key 样本: " +
+                        $"ProtoMgr.Members 里没找到物品表(共 {memberCount} 项)。Key(FullName) 样本: " +
                         string.Join(" | ", keySamples.ToArray()));
                     return result;
                 }
@@ -914,8 +1048,102 @@ namespace QteTrainer
         // GetLocalCrt 是 private, 给上面几个功能开一个入口。
         private static Creature GetLocalCrtPublic()
         {
-            RefreshLocalReferences();
-            return _cachedLocalCrt;
+            try
+            {
+                var crt = GetLocalCrt();
+                if (crt != null) _cachedLocalCrt = crt;
+                return crt ?? _cachedLocalCrt;
+            }
+            catch { return _cachedLocalCrt; }
+        }
+
+        /* --------------------------------------------------------------------
+         * 游戏进行中显示鼠标
+         *
+         * 这个游戏在非菜单状态下会锁住/隐藏光标(xmod 的日志里能看到它 hook 了
+         * UnityEngine.Cursor.lockState 和 Cursor.visible), 所以面板画出来了也点不动。
+         * 这里直接写回 Cursor.lockState / Cursor.visible。
+         * 注意 xmod 也 hook 了这两个属性, 游戏自己可能每帧再改回去 —— 所以提供
+         * "锁定为可见" 模式: 开着的时候由我们在 LateUpdate 里每帧按住。
+         * -------------------------------------------------------------------- */
+        public static bool CursorForced { get; private set; }
+
+        public static void SetCursorForced(bool on)
+        {
+            CursorForced = on;
+            if (on) ApplyCursor();
+            QteTrainerPlugin.LogSource?.LogInfo(
+                $"鼠标: {(on ? "已解锁并强制显示(每帧按住, 游戏改回去也会被拉回来)" : "交还给游戏控制")}。");
+        }
+
+        public static void ToggleCursorForced()
+        {
+            SetCursorForced(!CursorForced);
+        }
+
+        /// <summary>每帧调用(仅当 CursorForced 为 true)。失败就自动关掉, 不刷日志。</summary>
+        public static void ApplyCursor()
+        {
+            try
+            {
+                UnityEngine.Cursor.lockState = UnityEngine.CursorLockMode.None;
+                UnityEngine.Cursor.visible = true;
+            }
+            catch (Exception ex)
+            {
+                CursorForced = false;
+                QteTrainerPlugin.LogSource?.LogWarning(
+                    $"设置鼠标失败, 已停用鼠标强制显示: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        /* --------------------------------------------------------------------
+         * 办事地点循环传送(纯键盘, 不需要鼠标)
+         *
+         * F12 / F6 在办事地点列表里前后循环并直接传送过去。
+         * 列表缓存 5 秒, 免得每按一次键就重新遍历场景。
+         * -------------------------------------------------------------------- */
+        private static List<BuildEntry> _buildCache;
+        private static float _buildCacheAt = -999f;
+        private static int _buildCursorIndex = -1;
+
+        private static List<BuildEntry> GetBuildPointsCached()
+        {
+            float now = 0f;
+            try { now = UnityEngine.Time.time; } catch { }
+            if (_buildCache == null || _buildCache.Count == 0 || now - _buildCacheAt > 5f)
+            {
+                _buildCache = GetBuildPoints();
+                _buildCacheAt = now;
+            }
+            return _buildCache;
+        }
+
+        public static void InvalidateBuildCache()
+        {
+            _buildCache = null;
+            _buildCacheAt = -999f;
+        }
+
+        public static void CycleBuildTeleport(int direction, string keyName)
+        {
+            var list = GetBuildPointsCached();
+            if (list == null || list.Count == 0)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning(
+                    $"[{keyName}] 当前场景没读到办事地点, 无法传送。");
+                return;
+            }
+
+            if (_buildCursorIndex < 0 || _buildCursorIndex >= list.Count)
+                _buildCursorIndex = direction > 0 ? -1 : 0;
+
+            _buildCursorIndex = (_buildCursorIndex + direction + list.Count) % list.Count;
+            var entry = list[_buildCursorIndex];
+
+            QteTrainerPlugin.LogSource?.LogInfo(
+                $"[{keyName}] 办事地点 {_buildCursorIndex + 1}/{list.Count}: {entry.Name} ({entry.Key})");
+            TeleportToBuild(entry);
         }
 
         public static void Teleport(string key)
@@ -1193,12 +1421,42 @@ namespace QteTrainer
                 return true;
             }
 
+            // 鼠标: 游戏进行中解锁并显示光标, 这样才能点面板按钮。
+            if (Pressed(kb, CursorBinding, QteTrainerPlugin.CursorKey.Value))
+            {
+                TrainerActions.ToggleCursorForced();
+                return true;
+            }
+
+            // 办事地点: 全部不需要鼠标。
+            if (QteTrainerPlugin.On && Pressed(kb, UnlockBuildBinding, QteTrainerPlugin.UnlockBuildKey.Value))
+            {
+                int n = TrainerActions.UnlockAllBuildPoints();
+                QteTrainerPlugin.LogSource?.LogInfo(
+                    $"[{QteTrainerPlugin.UnlockBuildKey.Value}] 解锁办事地点: {n} 个状态变化。");
+                return true;
+            }
+            if (QteTrainerPlugin.On && Pressed(kb, TpNextBuildBinding, QteTrainerPlugin.TpNextBuildKey.Value))
+            {
+                TrainerActions.CycleBuildTeleport(+1, QteTrainerPlugin.TpNextBuildKey.Value);
+                return true;
+            }
+            if (QteTrainerPlugin.On && Pressed(kb, TpPrevBuildBinding, QteTrainerPlugin.TpPrevBuildKey.Value))
+            {
+                TrainerActions.CycleBuildTeleport(-1, QteTrainerPlugin.TpPrevBuildKey.Value);
+                return true;
+            }
+
             return true;
         }
 
         private static readonly KeyBinding ToggleBinding = new KeyBinding();
         private static readonly KeyBinding PanelBinding = new KeyBinding();
         private static readonly KeyBinding AddItemsBinding = new KeyBinding();
+        private static readonly KeyBinding CursorBinding = new KeyBinding();
+        private static readonly KeyBinding UnlockBuildBinding = new KeyBinding();
+        private static readonly KeyBinding TpNextBuildBinding = new KeyBinding();
+        private static readonly KeyBinding TpPrevBuildBinding = new KeyBinding();
 
         private static bool Pressed(UnityEngine.InputSystem.Keyboard kb, KeyBinding binding, string keyName)
         {
@@ -1357,6 +1615,10 @@ namespace QteTrainer
             try
             {
                 Hotkeys.Poll();
+
+                // 鼠标强制显示: 游戏(和 xmod)会每帧把光标改回锁定, 所以这里每帧按住。
+                if (TrainerActions.CursorForced)
+                    TrainerActions.ApplyCursor();
             }
             catch (Exception ex)
             {
@@ -1451,7 +1713,15 @@ namespace QteTrainer
 
             GUILayout.Label("<b>QTE / 万能 Trainer</b>");
             GUILayout.Label(
-                $"总开关: 开   {QteTrainerPlugin.ToggleKey.Value}=关闭全部  {QteTrainerPlugin.PanelKey.Value}=隐藏面板  {QteTrainerPlugin.AddItemsKey.Value}=添加全部物品");
+                $"{QteTrainerPlugin.ToggleKey.Value}=关闭全部  {QteTrainerPlugin.PanelKey.Value}=隐藏面板  " +
+                $"{QteTrainerPlugin.AddItemsKey.Value}=加物品  {QteTrainerPlugin.CursorKey.Value}=鼠标  " +
+                $"{QteTrainerPlugin.UnlockBuildKey.Value}=解锁地点  {QteTrainerPlugin.TpPrevBuildKey.Value}/{QteTrainerPlugin.TpNextBuildKey.Value}=上/下一个地点");
+
+            // 鼠标开关放最上面: 游戏进行中光标默认是锁的, 不开这个面板根本点不动。
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button(TrainerActions.CursorForced ? "鼠标: 已强制显示 (点击交还游戏)" : "鼠标: 游戏控制中 (点击强制显示)"))
+                TrainerActions.ToggleCursorForced();
+            GUILayout.EndHorizontal();
 
             // 分页标签: 内容分成三页, 单页高度就不会超出屏幕。
             GUILayout.BeginHorizontal();
@@ -1576,6 +1846,11 @@ namespace QteTrainer
             if (buildList == null)
                 buildList = TrainerActions.GetBuildPoints();
 
+            GUILayout.Label(
+                $"无鼠标操作: {QteTrainerPlugin.UnlockBuildKey.Value}=解锁全部, " +
+                $"{QteTrainerPlugin.TpPrevBuildKey.Value}=上一个地点, {QteTrainerPlugin.TpNextBuildKey.Value}=下一个地点",
+                GUI.skin.box);
+
             int pageSize = Math.Max(1, QteTrainerPlugin.BuildPageSize.Value);
 
             var shown = new List<TrainerActions.BuildEntry>();
@@ -1600,6 +1875,7 @@ namespace QteTrainer
             {
                 int n = TrainerActions.UnlockAllBuildPoints();
                 QteTrainerPlugin.LogSource?.LogInfo($"解锁办事地点: {n} 个状态变化。");
+                TrainerActions.InvalidateBuildCache();
                 buildList = TrainerActions.GetBuildPoints();
             }
             if (GUILayout.Button("刷新", GUILayout.Width(60)))
