@@ -27,6 +27,7 @@ namespace QteTrainer
         public static ConfigEntry<bool> ShowHint;
         public static ConfigEntry<string> ToggleKey;
         public static ConfigEntry<string> PanelKey;
+        public static ConfigEntry<string> AddItemsKey;
         public static ConfigEntry<bool> QteAutoWin;
         public static ConfigEntry<bool> SkipDialogue;
         public static ConfigEntry<bool> InfiniteHp;
@@ -68,6 +69,9 @@ namespace QteTrainer
                 "总开关热键, 填 UnityEngine.InputSystem.Key 的枚举名, 例如 F8 / F9 / F10 / Insert / Home / PageUp。");
             PanelKey = Config.Bind("Master", "PanelKey", "F9",
                 "面板显示/隐藏热键(仅在总开关开启后有效)。");
+            AddItemsKey = Config.Bind("Master", "AddItemsKey", "F10",
+                "一键添加全部物品的热键。游戏进行中(不需要鼠标/暂停菜单)直接按就能触发, " +
+                "每种物品的数量用面板「功能」页的 +/- 或 cfg 里 Items/GiveAllCount 设置。");
 
             QteAutoWin = Config.Bind("QTE", "AutoWin", false, "自动通过空格节奏/AD平衡两个小游戏");
             SkipDialogue = Config.Bind("Helper", "SkipDialogue", false, "自动推进对话/剧情");
@@ -120,7 +124,7 @@ namespace QteTrainer
             LogSource.LogInfo("QTE Trainer loaded.");
             LogSource.LogInfo(
                 $"总开关 = {(On ? "开启" : "关闭(全部功能停用)")} | " +
-                $"开关热键 = {ToggleKey.Value} | 面板热键 = {PanelKey.Value} | " +
+                $"开关热键 = {ToggleKey.Value} | 面板热键 = {PanelKey.Value} | 加物品热键 = {AddItemsKey.Value} | " +
                 $"EnableOnStart = {EnableOnStart.Value}");
             LogSource.LogInfo(
                 "提示: 本游戏 Active Input Handling = Input System Package(New), " +
@@ -366,6 +370,71 @@ namespace QteTrainer
         /// 现在直接用强类型的 ProtoMgr.Instance (C# 允许通过派生类名访问基类静态成员),
         /// 再用 EnumerateAny 枚举, 和 xmod 的做法一致。
         /// </summary>
+        /// <summary>
+        /// 只看 KeyMap 的**第一个**元素, 判断它的 Value 是不是 Game.ProtoItem。
+        /// 用 FirstOf 而不是 EnumerateAny, 免得为了探测把一个上千条的表整个枚举一遍。
+        /// </summary>
+        private static bool KeyMapHoldsProtoItem(object memberObj, out object keyMap)
+        {
+            keyMap = null;
+            try
+            {
+                var km = ReflectGet(memberObj, "KeyMap");
+                if (km == null) return false;
+
+                if (TryGetFirst(km, out object firstPair) && firstPair != null)
+                {
+                    object v = PairPart(firstPair, "Value");
+                    if (v is ProtoItem)
+                    {
+                        keyMap = km;
+                        return true;
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        /// <summary>取集合的第一个元素就停, 不做完整枚举。</summary>
+        private static bool TryGetFirst(object collection, out object first)
+        {
+            first = null;
+            if (collection == null) return false;
+
+            try
+            {
+                if (collection is IEnumerable managed)
+                {
+                    foreach (var o in managed) { first = o; return true; }
+                    return false;
+                }
+            }
+            catch { }
+
+            try
+            {
+                var getEnum = collection.GetType().GetMethod("GetEnumerator", Type.EmptyTypes);
+                if (getEnum == null) return false;
+                object en = getEnum.Invoke(collection, null);
+                if (en == null) return false;
+
+                var et = en.GetType();
+                var moveNext = et.GetMethod("MoveNext", Type.EmptyTypes);
+                var current = et.GetProperty("Current") ?? et.GetProperty("get_Current");
+                if (moveNext == null || current == null) return false;
+
+                object more = moveNext.Invoke(en, null);
+                if (more is bool b && b)
+                {
+                    first = current.GetValue(en, null);
+                    return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
         private static List<string> GetAllItemKeys()
         {
             var result = new List<string>();
@@ -392,17 +461,46 @@ namespace QteTrainer
                     return result;
                 }
 
-                // Members 是 Dictionary<Type, ProtoMgr+Member>, 找 Key 为 Game.ProtoItem 的那一项。
+                // Members 是 Dictionary<Type, ProtoMgr+Member>。
+                //
+                // 上一版按 Key.ToString() 去匹配 "Game.ProtoItem", 实测失败:
+                //   ProtoMgr.Members 里没找到 Game.ProtoItem(共 120 项)
+                // 也就是 120 项都枚举到了, 但 Key(Il2CppSystem.Type) 的 ToString() 并不是
+                // "Game.ProtoItem" 这种形式, 所以字符串匹配靠不住。
+                //
+                // 现在改成按 **值类型** 认: 逐个 Member 取 KeyMap 的第一个元素,
+                // 看它的 Value 是不是 Game.ProtoItem。这个判据不依赖任何字符串格式。
                 object itemMember = null;
+                object keyMap = null;
                 int memberCount = 0;
+                var keySamples = new List<string>();
+                string matchedBy = null;
+
                 foreach (var pair in EnumerateAny(members))
                 {
                     memberCount++;
                     object k = PairPart(pair, "Key");
                     string name = k?.ToString() ?? string.Empty;
-                    if (name.EndsWith("ProtoItem", StringComparison.OrdinalIgnoreCase))
+                    if (keySamples.Count < 6) keySamples.Add(string.IsNullOrEmpty(name) ? "(空)" : name);
+
+                    object v = PairPart(pair, "Value");
+                    if (v == null) continue;
+
+                    // 1) 名字匹配(命中就最省事)
+                    if (itemMember == null
+                        && name.IndexOf("ProtoItem", StringComparison.OrdinalIgnoreCase) >= 0)
                     {
-                        itemMember = PairPart(pair, "Value");
+                        itemMember = v;
+                        matchedBy = "name:" + name;
+                        break;
+                    }
+
+                    // 2) 值类型匹配
+                    if (itemMember == null && KeyMapHoldsProtoItem(v, out object probeMap))
+                    {
+                        itemMember = v;
+                        keyMap = probeMap;
+                        matchedBy = "value type = Game.ProtoItem";
                         break;
                     }
                 }
@@ -410,14 +508,16 @@ namespace QteTrainer
                 if (itemMember == null)
                 {
                     QteTrainerPlugin.LogSource?.LogWarning(
-                        $"ProtoMgr.Members 里没找到 Game.ProtoItem(共 {memberCount} 项)。");
+                        $"ProtoMgr.Members 里没找到物品表(共 {memberCount} 项)。Key 样本: " +
+                        string.Join(" | ", keySamples.ToArray()));
                     return result;
                 }
 
-                object keyMap = ReflectGet(itemMember, "KeyMap");
+                if (keyMap == null)
+                    keyMap = ReflectGet(itemMember, "KeyMap");
                 if (keyMap == null)
                 {
-                    QteTrainerPlugin.LogSource?.LogWarning("ProtoItem Member.KeyMap 为 null。");
+                    QteTrainerPlugin.LogSource?.LogWarning($"物品表 Member.KeyMap 为 null (匹配方式: {matchedBy})。");
                     return result;
                 }
 
@@ -430,7 +530,8 @@ namespace QteTrainer
                 }
 
                 QteTrainerPlugin.LogSource?.LogInfo(
-                    $"GetAllItemKeys: Members={memberCount} 项, 找到物品 Key {result.Count} 个。");
+                    $"GetAllItemKeys: Members={memberCount} 项, 匹配方式=[{matchedBy}], 找到物品 Key {result.Count} 个。" +
+                    (result.Count > 0 ? $" 样本: {string.Join(", ", result.GetRange(0, Math.Min(5, result.Count)).ToArray())}" : ""));
             }
             catch (Exception ex)
             {
@@ -1059,7 +1160,8 @@ namespace QteTrainer
                 _reported = true;
                 QteTrainerPlugin.LogSource?.LogInfo(
                     $"热键后端: Input System (UnityEngine.InputSystem.Keyboard)。" +
-                    $"总开关 = {QteTrainerPlugin.ToggleKey.Value}, 面板 = {QteTrainerPlugin.PanelKey.Value}");
+                    $"总开关 = {QteTrainerPlugin.ToggleKey.Value}, 面板 = {QteTrainerPlugin.PanelKey.Value}, " +
+                    $"添加全部物品 = {QteTrainerPlugin.AddItemsKey.Value}");
             }
 
             if (Pressed(kb, ToggleBinding, QteTrainerPlugin.ToggleKey.Value))
@@ -1074,11 +1176,29 @@ namespace QteTrainer
                 return true;
             }
 
+            // 添加全部物品: 不依赖鼠标/暂停菜单, 游戏进行中按一下就触发。
+            if (Pressed(kb, AddItemsBinding, QteTrainerPlugin.AddItemsKey.Value))
+            {
+                if (QteTrainerPlugin.On)
+                {
+                    int n = TrainerActions.AddAllItems(QteTrainerPlugin.AllItemCount.Value);
+                    QteTrainerPlugin.LogSource?.LogInfo(
+                        $"[{QteTrainerPlugin.AddItemsKey.Value}] 添加全部物品: {n} 种, 每种 {QteTrainerPlugin.AllItemCount.Value} 个。");
+                }
+                else
+                {
+                    QteTrainerPlugin.LogSource?.LogWarning(
+                        $"总开关是关闭的, 请先按 {QteTrainerPlugin.ToggleKey.Value} 开启, 再按 {QteTrainerPlugin.AddItemsKey.Value} 添加物品。");
+                }
+                return true;
+            }
+
             return true;
         }
 
         private static readonly KeyBinding ToggleBinding = new KeyBinding();
         private static readonly KeyBinding PanelBinding = new KeyBinding();
+        private static readonly KeyBinding AddItemsBinding = new KeyBinding();
 
         private static bool Pressed(UnityEngine.InputSystem.Keyboard kb, KeyBinding binding, string keyName)
         {
@@ -1167,6 +1287,22 @@ namespace QteTrainer
                     && UnityEngine.Input.GetKeyDown(panel))
                 {
                     TrainerActions.TogglePanel();
+                    return;
+                }
+                if (Enum.TryParse((QteTrainerPlugin.AddItemsKey.Value ?? string.Empty).Trim(), true, out KeyCode addItem)
+                    && UnityEngine.Input.GetKeyDown(addItem))
+                {
+                    if (QteTrainerPlugin.On)
+                    {
+                        int n = TrainerActions.AddAllItems(QteTrainerPlugin.AllItemCount.Value);
+                        QteTrainerPlugin.LogSource?.LogInfo(
+                            $"[{QteTrainerPlugin.AddItemsKey.Value}] 添加全部物品: {n} 种, 每种 {QteTrainerPlugin.AllItemCount.Value} 个。");
+                    }
+                    else
+                    {
+                        QteTrainerPlugin.LogSource?.LogWarning(
+                            $"总开关是关闭的, 请先按 {QteTrainerPlugin.ToggleKey.Value} 开启, 再按 {QteTrainerPlugin.AddItemsKey.Value} 添加物品。");
+                    }
                 }
             }
             catch (Exception ex)
@@ -1206,6 +1342,9 @@ namespace QteTrainer
         private List<TrainerActions.BuildEntry> buildList;
         private int buildPage;
         private string buildNumber = string.Empty;
+
+        // 面板分页: 0=功能 1=传送 2=办事地点。分成三页是为了单页高度不超出屏幕。
+        private int panelPage;
 
         private void Update()
         {
@@ -1302,10 +1441,43 @@ namespace QteTrainer
         {
             EnsureTeleportInput();
 
-            GUILayout.BeginArea(new Rect(8, 8, 520, 760));
-            GUILayout.Label("<b>QTE / 万能 Trainer</b>");
-            GUILayout.Label($"总开关: 开  ({QteTrainerPlugin.ToggleKey.Value} 关闭全部 / {QteTrainerPlugin.PanelKey.Value} 隐藏面板)");
+            // 面板尺寸跟着屏幕走, 不再写死 520x760 —— 之前在小屏幕上内容直接溢出到界面外。
+            float sw = 1280f, sh = 720f;
+            try { sw = UnityEngine.Screen.width; sh = UnityEngine.Screen.height; } catch { }
+            float w = Math.Min(560f, Math.Max(320f, sw - 16f));
+            float h = Math.Min(700f, Math.Max(240f, sh - 16f));
 
+            GUILayout.BeginArea(new Rect(8, 8, w, h));
+
+            GUILayout.Label("<b>QTE / 万能 Trainer</b>");
+            GUILayout.Label(
+                $"总开关: 开   {QteTrainerPlugin.ToggleKey.Value}=关闭全部  {QteTrainerPlugin.PanelKey.Value}=隐藏面板  {QteTrainerPlugin.AddItemsKey.Value}=添加全部物品");
+
+            // 分页标签: 内容分成三页, 单页高度就不会超出屏幕。
+            GUILayout.BeginHorizontal();
+            PageTab(0, "功能");
+            PageTab(1, "传送");
+            PageTab(2, "办事地点");
+            GUILayout.EndHorizontal();
+
+            if (panelPage == 0) DrawPageCheats();
+            else if (panelPage == 1) DrawPageTeleport();
+            else DrawPageBuild();
+
+            GUILayout.EndArea();
+        }
+
+        private void PageTab(int index, string title)
+        {
+            bool active = panelPage == index;
+            string label = active ? "<b>[" + title + "]</b>" : " " + title + " ";
+            if (GUILayout.Button(label) && !active)
+                panelPage = index;
+        }
+
+        /* ---------------------------- 第 1 页: 功能 ---------------------------- */
+        private void DrawPageCheats()
+        {
             QteTrainerPlugin.QteAutoWin.Value = GUILayout.Toggle(QteTrainerPlugin.QteAutoWin.Value, "QTE 自动通关（空格节奏 + AD 平衡）");
             QteTrainerPlugin.InfiniteHp.Value = GUILayout.Toggle(QteTrainerPlugin.InfiniteHp.Value, "无限生命 / 无敌");
             QteTrainerPlugin.InfiniteEnergy.Value = GUILayout.Toggle(QteTrainerPlugin.InfiniteEnergy.Value, "无限体力/精力（取消消耗）");
@@ -1317,34 +1489,50 @@ namespace QteTrainer
             QteTrainerPlugin.MoveSpeedMul.Value = GUILayout.HorizontalSlider(QteTrainerPlugin.MoveSpeedMul.Value, 0.1f, 10f);
 
             GUILayout.Space(6);
-            GUILayout.Label("一键全物品 - 数量: " + QteTrainerPlugin.AllItemCount.Value);
+            GUILayout.Label("一键全物品 - 每种数量: " + QteTrainerPlugin.AllItemCount.Value
+                            + $"   (游戏进行中可直接按 {QteTrainerPlugin.AddItemsKey.Value})");
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button("-", GUILayout.Width(40))) QteTrainerPlugin.AllItemCount.Value = Math.Max(1, QteTrainerPlugin.AllItemCount.Value - 1);
-            if (GUILayout.Button("+", GUILayout.Width(40))) QteTrainerPlugin.AllItemCount.Value = Math.Min(9999, QteTrainerPlugin.AllItemCount.Value + 1);
+            if (GUILayout.Button("-1", GUILayout.Width(46))) QteTrainerPlugin.AllItemCount.Value = Math.Max(1, QteTrainerPlugin.AllItemCount.Value - 1);
+            if (GUILayout.Button("+1", GUILayout.Width(46))) QteTrainerPlugin.AllItemCount.Value = Math.Min(9999, QteTrainerPlugin.AllItemCount.Value + 1);
+            if (GUILayout.Button("-10", GUILayout.Width(50))) QteTrainerPlugin.AllItemCount.Value = Math.Max(1, QteTrainerPlugin.AllItemCount.Value - 10);
+            if (GUILayout.Button("+10", GUILayout.Width(50))) QteTrainerPlugin.AllItemCount.Value = Math.Min(9999, QteTrainerPlugin.AllItemCount.Value + 10);
             GUILayout.EndHorizontal();
             if (GUILayout.Button("添加全部物品"))
-            {
-                int n = TrainerActions.AddAllItems(QteTrainerPlugin.AllItemCount.Value);
-                QteTrainerPlugin.LogSource?.LogInfo($"Added {n} item stacks.");
-            }
+                DoAddAllItems();
+
             if (GUILayout.Button("拉满全部NPC好感/星星 (" + QteTrainerPlugin.MaxFavorStars.Value + "星)"))
-            {
                 TrainerActions.MaxAllNpcFavor(QteTrainerPlugin.MaxFavorStars.Value);
-            }
-            if (GUILayout.Button("金钱设为 99999"))
-            {
-                TrainerActions.SetGold(99999);
-            }
-            if (GUILayout.Button("训练经验 +10000"))
-            {
-                TrainerActions.AddExp(10000);
-            }
-            if (GUILayout.Button("时间 +8 小时"))
-            {
-                TrainerActions.JumpTime(8f);
-            }
+
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("金钱设为 99999")) TrainerActions.SetGold(99999);
+            if (GUILayout.Button("训练经验 +10000")) TrainerActions.AddExp(10000);
+            if (GUILayout.Button("时间 +8 小时")) TrainerActions.JumpTime(8f);
+            GUILayout.EndHorizontal();
 
             GUILayout.Space(6);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("一键全开")) TrainerActions.SetAll(true);
+            if (GUILayout.Button("一键全关")) TrainerActions.SetAll(false);
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("导出配置")) TrainerActions.ExportPreset();
+            if (GUILayout.Button("导入配置")) TrainerActions.ImportPreset();
+            GUILayout.EndHorizontal();
+            if (GUILayout.Button("关闭总开关（全部功能停用）"))
+                TrainerActions.ToggleMaster();
+
+            GUILayout.Label("全部实时开关并保存到 BepInEx/config/arena.qte.trainer.cfg");
+        }
+
+        private void DoAddAllItems()
+        {
+            int n = TrainerActions.AddAllItems(QteTrainerPlugin.AllItemCount.Value);
+            QteTrainerPlugin.LogSource?.LogInfo($"Added {n} item stacks.");
+        }
+
+        /* ---------------------------- 第 2 页: 传送 ---------------------------- */
+        private void DrawPageTeleport()
+        {
             GUILayout.Label("快捷传送 Key: [" + (string.IsNullOrEmpty(teleportInput) ? "(空)" : teleportInput) + "]");
             KeypadRow(KeypadRow1);
             KeypadRow(KeypadRow2);
@@ -1378,49 +1566,18 @@ namespace QteTrainer
             {
                 GUILayout.Label("提示: 预设 Key 在 cfg 中设置后即可用；或用上面的字符键盘输入后传送。", GUI.skin.box);
             }
-
-            DrawBuildMenu();
-
             GUILayout.Space(6);
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("一键全开"))
-                TrainerActions.SetAll(true);
-            if (GUILayout.Button("一键全关"))
-                TrainerActions.SetAll(false);
-            GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("导出配置"))
-                TrainerActions.ExportPreset();
-            if (GUILayout.Button("导入配置"))
-                TrainerActions.ImportPreset();
-            GUILayout.EndHorizontal();
-            if (GUILayout.Button("关闭总开关（全部功能停用）"))
-                TrainerActions.ToggleMaster();
-
-            GUILayout.Label("全部实时开关并保存到 BepInEx/config/arena.qte.trainer.cfg");
-            GUILayout.Label($"快捷键: {QteTrainerPlugin.ToggleKey.Value} 总开关 / {QteTrainerPlugin.PanelKey.Value} 显示或隐藏面板");
-
-            GUILayout.EndArea();
+            GUILayout.Label("按具体办事地点传送请看「办事地点」页。", GUI.skin.box);
         }
 
-        /* --------------------------------------------------------------------
-         * 办事地点菜单
-         *
-         * 数据来自 Game.BuildPointMgr.Instance.BuildPoints(见 TrainerActions 里的说明),
-         * 每个选项前面带**绝对编号**, 可以直接用下面的数字键盘输编号再按"前往"。
-         * 列表每次打开面板时按需刷新, 不做每帧反射。
-         * -------------------------------------------------------------------- */
-        private void DrawBuildMenu()
+        /* ------------------------- 第 3 页: 办事地点 ------------------------- */
+        private void DrawPageBuild()
         {
-            GUILayout.Space(6);
-            GUILayout.Label("<b>办事地点 / 隐藏地点</b>", GUI.skin.label);
-
             if (buildList == null)
                 buildList = TrainerActions.GetBuildPoints();
 
             int pageSize = Math.Max(1, QteTrainerPlugin.BuildPageSize.Value);
 
-            // 过滤: 可以选择只看还没解锁的(= 隐藏地点)
             var shown = new List<TrainerActions.BuildEntry>();
             int hiddenCount = 0;
             if (buildList != null)
@@ -1439,13 +1596,13 @@ namespace QteTrainer
                 + (QteTrainerPlugin.BuildShowUnlocked.Value ? "" : " (只显示未解锁)"));
 
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button("一键解锁全部办事地点"))
+            if (GUILayout.Button("一键解锁全部"))
             {
                 int n = TrainerActions.UnlockAllBuildPoints();
                 QteTrainerPlugin.LogSource?.LogInfo($"解锁办事地点: {n} 个状态变化。");
                 buildList = TrainerActions.GetBuildPoints();
             }
-            if (GUILayout.Button("刷新列表", GUILayout.Width(80)))
+            if (GUILayout.Button("刷新", GUILayout.Width(60)))
             {
                 buildList = TrainerActions.GetBuildPoints();
                 buildPage = 0;
@@ -1457,10 +1614,10 @@ namespace QteTrainer
             }
             GUILayout.EndHorizontal();
 
-            // 数字键盘 + 前往
+            // 数字键盘: 输绝对编号后前往/解锁
             GUILayout.BeginHorizontal();
-            GUILayout.Label("编号:", GUILayout.Width(40));
-            GUILayout.Label("[" + (string.IsNullOrEmpty(buildNumber) ? "-" : buildNumber) + "]", GUILayout.Width(50));
+            GUILayout.Label("编号", GUILayout.Width(34));
+            GUILayout.Label("[" + (string.IsNullOrEmpty(buildNumber) ? "-" : buildNumber) + "]", GUILayout.Width(44));
             for (int d = 1; d <= 9; d++)
             {
                 int digit = d;
@@ -1475,45 +1632,11 @@ namespace QteTrainer
 
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("前往该编号", GUILayout.Width(110)))
-            {
-                if (int.TryParse(buildNumber, out int idx) && idx >= 1 && idx <= shown.Count)
-                {
-                    TrainerActions.TeleportToBuild(shown[idx - 1]);
-                }
-                else
-                {
-                    QteTrainerPlugin.LogSource?.LogWarning(
-                        $"编号 \"{buildNumber}\" 超出范围(1..{shown.Count})。");
-                }
-            }
+                GotoByNumber(shown);
             if (GUILayout.Button("解锁该编号", GUILayout.Width(110)))
-            {
-                if (int.TryParse(buildNumber, out int idx) && idx >= 1 && idx <= shown.Count)
-                {
-                    var e = shown[idx - 1];
-                    TrainerActions.UnlockAllBuildPoints();
-                    buildList = TrainerActions.GetBuildPoints();
-                    QteTrainerPlugin.LogSource?.LogInfo($"已对 [{e.Key}] {e.Name} 执行解锁。");
-                }
-                else
-                {
-                    QteTrainerPlugin.LogSource?.LogWarning(
-                        $"编号 \"{buildNumber}\" 超出范围(1..{shown.Count})。");
-                }
-            }
+                UnlockByNumber(shown);
             if (GUILayout.Button("清空", GUILayout.Width(60)))
                 buildNumber = string.Empty;
-            GUILayout.EndHorizontal();
-
-            // 分页
-            int pages = Math.Max(1, (shown.Count + pageSize - 1) / pageSize);
-            if (buildPage >= pages) buildPage = pages - 1;
-            if (buildPage < 0) buildPage = 0;
-
-            GUILayout.BeginHorizontal();
-            GUILayout.Label($"第 {buildPage + 1}/{pages} 页", GUILayout.Width(80));
-            if (GUILayout.Button("上一页", GUILayout.Width(70))) buildPage = Math.Max(0, buildPage - 1);
-            if (GUILayout.Button("下一页", GUILayout.Width(70))) buildPage = Math.Min(pages - 1, buildPage + 1);
             GUILayout.EndHorizontal();
 
             if (shown.Count == 0)
@@ -1522,18 +1645,29 @@ namespace QteTrainer
                 return;
             }
 
+            int pages = Math.Max(1, (shown.Count + pageSize - 1) / pageSize);
+            if (buildPage >= pages) buildPage = pages - 1;
+            if (buildPage < 0) buildPage = 0;
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label($"第 {buildPage + 1}/{pages} 页 (每页 {pageSize} 条)", GUILayout.Width(170));
+            if (GUILayout.Button("上一页", GUILayout.Width(70))) buildPage = Math.Max(0, buildPage - 1);
+            if (GUILayout.Button("下一页", GUILayout.Width(70))) buildPage = Math.Min(pages - 1, buildPage + 1);
+            GUILayout.EndHorizontal();
+
             int from = buildPage * pageSize;
             int to = Math.Min(shown.Count, from + pageSize);
             for (int i = from; i < to; i++)
             {
                 var e = shown[i];
-                string label = $"{i + 1}. {e.Name}";
+                string name = string.IsNullOrWhiteSpace(e.Name) ? e.Key : e.Name;
+                string label = $"{i + 1}. {name}";
                 if (!string.IsNullOrWhiteSpace(e.Key) && e.Key != e.Name)
                     label += $" ({e.Key})";
 
                 GUILayout.BeginHorizontal();
-                GUILayout.Label(label, GUILayout.Width(280));
-                GUILayout.Label(e.IsUnlock ? $"已解锁 Lv{e.Rank}" : "未解锁", GUILayout.Width(80));
+                GUILayout.Label(label, GUILayout.Width(250));
+                GUILayout.Label(e.IsUnlock ? $"Lv{e.Rank}" : "未解锁", GUILayout.Width(56));
                 if (GUILayout.Button("前往", GUILayout.Width(52)))
                     TrainerActions.TeleportToBuild(e);
                 if (GUILayout.Button("解锁", GUILayout.Width(52)))
@@ -1542,6 +1676,33 @@ namespace QteTrainer
                     buildList = TrainerActions.GetBuildPoints();
                 }
                 GUILayout.EndHorizontal();
+            }
+        }
+
+        private void GotoByNumber(List<TrainerActions.BuildEntry> shown)
+        {
+            if (int.TryParse(buildNumber, out int idx) && idx >= 1 && idx <= shown.Count)
+            {
+                TrainerActions.TeleportToBuild(shown[idx - 1]);
+            }
+            else
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"编号 \"{buildNumber}\" 超出范围(1..{shown.Count})。");
+            }
+        }
+
+        private void UnlockByNumber(List<TrainerActions.BuildEntry> shown)
+        {
+            if (int.TryParse(buildNumber, out int idx) && idx >= 1 && idx <= shown.Count)
+            {
+                var e = shown[idx - 1];
+                TrainerActions.UnlockAllBuildPoints();
+                buildList = TrainerActions.GetBuildPoints();
+                QteTrainerPlugin.LogSource?.LogInfo($"已对 [{e.Key}] {e.Name} 执行解锁。");
+            }
+            else
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"编号 \"{buildNumber}\" 超出范围(1..{shown.Count})。");
             }
         }
 
