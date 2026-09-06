@@ -289,6 +289,82 @@ float h = Math.Min(700f, Math.Max(240f, Screen.height - 16f));
 
 办事地点每页条数由 `Build/PageSize` 控制（默认 8，嫌挤可以调小）。
 
+## v1.5.0：按 log4 定位的修正（添加物品 / 坐标传送 / 鼠标）
+
+### 1. 添加全部物品：真正的根因找到了 —— `Il2CppSystem.Type` 不能当字符串比较
+
+log4 里的关键一行是：
+
+```
+没找到物品表(共 120 项)。Key 样本: Il2CppSystem.Type | Il2CppSystem.Type | ...
+```
+
+120 项都枚举出来了，但每个 Key 打印出来都是 `Il2CppSystem.Type`。原因是：把 `Il2CppSystem.Type`
+放在 `object` 引用上调 `.ToString()`，走到的是托管包装类的 `Object.ToString()`，**不是** native
+的全名（Il2CppInterop 没有 override 它）。所以 v1.3.0 的 `Key.Contains("ProtoItem")` 永远比不中，
+v1.4.0 的「按值类型认表」那条路也全部被拒（`Game.ProtoItem` 是 class，不是值类型）。
+
+正确做法是 xmod 自己的 IL —— 从 `FlowerPicker.dll` 里反编译出来（`<SetupCoroutine>d__3::MoveNext`）：
+
+```
+call     Game.ProtoMgr::get_Instance
+callvirt Game.ProtoMgr::get_Members
+ldstr    "Game.ProtoItem"
+call     Il2CppSystem.Type::GetType      <-- 就是这一步
+callvirt ContainsKey
+callvirt get_Item
+callvirt Member::get_KeyMap
+```
+
+所以 `GetAllItemKeys()` 现在走两条路：
+
+- **路径 A（主路，照抄 xmod）**：`Il2CppSystem.Type.GetType("Game.ProtoItem")` 直接拿去当
+  `Members` 的索引键。不依赖字符串比较，也不依赖 `Il2CppSystem.Type` 的托管包装。
+- **路径 B（兜底）**：读 Key 的 `FullName` / `Name` 属性来匹配 `ProtoItem`。**不再调 `ToString()`。**
+
+两条都失败会打日志说明，包括 `GetType` 返回 null 的情况。
+
+### 2. 坐标传送：`GetSingleton` 少了 `FlattenHierarchy`
+
+log4：`拿不到本地玩家 Creature, 无法坐标传送。` ×8。
+
+`Game.PlayerMgr : Game.SingletonMono<PlayerMgr>`，而 `Instance` 是定义在基类上的 **静态** 属性。
+`GetProperty("Instance", Public | NonPublic | Static)` 不带 `FlattenHierarchy` 时**找不到继承来的
+静态成员**（.NET 反射的规则：静态成员不属于子类），所以 `PlayerMgr.Instance` 一直返回 null。
+
+这和「添加物品」第一次失败是**同一个 bug**，只是当时只修了 `ProtoMgr` 那一处。
+现在 `GetSingleton()` 统一带 `FlattenHierarchy`，并额外手动沿基类链查一遍兜底。
+
+本地玩家改用强类型路径，不再用反射：
+`PlayerMgr.Instance.LocalCrt`（备选 `LocalPlayer.Crt`）。
+注意 `Player.Info` 返回的是 `InfoPlayer`（`: InfoProtoBase`），和 `InfoCreature` 没有继承关系，
+不能 `as InfoCreature` —— Creature 身上的 `.Info` 才是 `InfoCreature`。
+
+### 3. 新增：游戏进行中显示鼠标（`F7`）
+
+游戏在非菜单状态下会把光标锁住并隐藏（xmod 自己 hook 了 `Cursor.lockState` / `Cursor.visible`
+来解锁，说明默认就是锁的），所以面板弹出来也点不动。
+
+`TrainerActions.SetCursorForced(true)` 会把 `Cursor.lockState = CursorLockMode.None`、
+`Cursor.visible = true`，并且在 `Update()` 里**每帧按住**（因为游戏会不断把它改回去）。
+再按一次 `F7` 交还给游戏。设置失败会自动停用，不刷日志。
+
+面板顶部也有一个「鼠标」按钮，但要先用 F7 解锁光标才点得到它。
+
+### 4. 新增：纯键盘的办事地点循环传送（`F12` / `F6`）
+
+`F12` 下一个、`F6` 上一个，在办事地点列表里循环并直接传送过去，全程不需要鼠标。
+`F11` 一键解锁全部办事地点。列表缓存 5 秒，解锁后会失效重取。
+
+### 本轮新增热键
+
+| 键 | 配置项 | 作用 |
+|---|---|---|
+| F7 | `Master/CursorKey` | 鼠标强制显示 / 交还游戏 |
+| F11 | `Master/UnlockBuildKey` | 解锁全部办事地点 |
+| F12 | `Master/TpNextBuildKey` | 传送到下一个办事地点 |
+| F6 | `Master/TpPrevBuildKey` | 传送到上一个办事地点 |
+
 ## 注意事项
 
 - 若同时使用原 xmod 的移速倍率，两处倍率会相乘；关掉其中一个即可。
