@@ -23,7 +23,8 @@
 - 战斗破解：一击破防（敌人被打时 HP 直接清零，可独立开关）。
 - 移动速度倍率滑块（0.1 ~ 10）。
 - 一键全物品（快捷批量添加全部物品，数量可调；原 xmod 手动添加仍可并存）。
-- 一键拉满当前选中 NPC 好感/星星（默认 5 星，可在 cfg 中改）。
+- 一键拉满**全部** NPC 好感/星星（默认 5 星，可在 cfg 中改；不再依赖 UI 里选中了谁）。
+- **一键解锁全部办事地点**，以及**带数字编号的办事地点传送菜单**（数字键盘输编号 + 前往/解锁，可分页、可只看未解锁的隐藏地点）。
 - 金钱设为 99999、训练经验 +10000、时间 +8 小时。
 - 无限背包/物品数量不减（物品消耗与删除不会真正扣数量，可开关）。
 - 快捷传送：游戏内输入锚点/传送点 Key 后立即传送；码头/黑沼泽/祭坛预设 Key 可在 cfg 中填写。
@@ -133,6 +134,98 @@ v1.1.0 进游戏黑屏但进程不退出，`BepInEx/LogOutput.log` 里其实写�
 `v` 而不是 `value`，之前 HarmonyX 直接报
 `Parameter "value" not found in method void Game.InfoCreature::SetCurtHP(float v)`，
 所以「无限血 / 无限体力」从来没生效过。
+
+## 「添加全物品 / 拉满好感」点了没反应（v1.3.0 修复）
+
+这两个都是**静默失败**：不报错、不闪退，只在 `LogOutput.log` 里留一句 warning。
+根因都在"怎么拿到游戏的单例"上，靠 dump `BepInEx/interop/Assembly-CSharp.dll` 确认：
+
+### 1. 添加全部物品
+
+```
+Game.ProtoMgr : Game.Singleton`1<Game.ProtoMgr>     // Instance 声明在泛型基类上
+Game.ProtoMgr+Member : .Lists / .KeyMap
+```
+
+旧代码用 `typeof(ProtoMgr).GetProperty("Instance", Static | Public | NonPublic)` 找单例。
+但 `Instance` 是**继承来的静态成员**，.NET 反射找继承的静态成员必须带
+`BindingFlags.FlattenHierarchy`，否则返回 `null` → `mgr == null` → 一个 Key 都取不到 →
+按钮点了只打一句 `No item keys were found.`。
+
+还有第二个独立 bug：枚举用了 `keysObj is System.Collections.IEnumerable`。
+Il2CppInterop 生成的 `Dictionary<,>` / `List<>` 只实现 `Il2CppSystem.Collections.IEnumerable`，
+**不**实现 `System.Collections.IEnumerable`，所以那个判断恒为 false。
+
+对照 xmod 的做法（`FlowerPicker.dll` → `ItemPanelAdapter.SetupCoroutine` 的 IL）：
+
+```
+call     ProtoMgr.get_Instance
+callvirt get_Members
+ldstr    "Game.ProtoItem"
+callvirt get_Item
+callvirt get_KeyMap
+callvirt GetEnumerator   ← 用 GetEnumerator, 不是 Keys
+```
+
+现在改成强类型 `ProtoMgr.Instance`（C# 允许通过派生类名访问基类静态成员），
+枚举走新的 `EnumerateAny()`（托管集合走 `IEnumerable`，Il2Cpp 集合反射驱动
+`GetEnumerator/MoveNext/Current`），并且每一步都打日志：
+
+```
+GetAllItemKeys: Members=NN 项, 找到物品 Key MMM 个。
+```
+
+### 2. 拉满 NPC 好感
+
+```
+Game.MainMenuForm : Game.UGuiForm : UnityGameFramework.Runtime.UIFormLogic
+```
+
+整条继承链上**根本没有 `Instance`**，所以旧代码的 `MainMenuForm.Instance` 反射恒为 null，
+按钮只会打 `没有选中的NPC，请先在角色/好感页面选中一个NPC。`
+
+现在改走：
+
+```
+Game.GirlMgr : Game.Singleton`1<Game.GirlMgr>
+   .Girls / .DicGirls
+   .SetFavorStar(key, star)          ← 直接用这个
+Game.ProtoGirl.GetProtoAll()         ← 静态, 全部 NPC 表
+```
+
+先用存档里已有的 `InfoGirl`，再用 `ProtoGirl.GetProtoAll()` 补齐还没进存档的 NPC，
+`GirlMgr.SetFavorStar` 失败时退回 `Commander.CmdSetNPCFavorStar`。
+
+## 新增：办事地点解锁 + 数字编号传送菜单（v1.3.0）
+
+已确认的类型关系：
+
+```
+Game.BuildPointMgr : Game.SingletonMono`1<BuildPointMgr>
+    .BuildPoints            -> List<BuildPoint>
+    .DicBuildPoints         -> Dictionary<string, BuildPoint>
+    .IsBuildUnlock(k) / .GetUpgradeRank(k) / .CanUpgrade(k) / .Upgrade(k)
+Game.BuildPoint : MonoBehaviour
+    .Key / .Info(InfoBuild) / .Proto(ProtoBuild) / .Upgrade() / .RefreshState()
+Game.InfoBuild  : .IsUnlock(只读) / .Rank(可写) / .CanBuild(可写) / .Proto
+Game.ProtoBuild : .Name / .Desc / .Condition / .Cost
+Game.MapAuxAnchorMgr : Game.Singleton`1<...>   .AnchorsByID
+Game.Commander.PlayerTranslation(string)       // public static
+Game.Entity.CurtPos                            // 可写, 用来兜底坐标传送
+```
+
+面板里新增「办事地点 / 隐藏地点」区块：
+
+- `一键解锁全部办事地点`：先走游戏的 `BuildPointMgr.Upgrade(key)` 正常流程
+  （执行前先把金钱拉到 9999999，免得因为余额不足失败），仍锁着就直接写
+  `InfoBuild.CanBuild = true` / `Rank = 1` 兜底，最后 `RefreshState()` 刷新显示。
+  每个地点都会打一行 `解锁 false->true, Rank 0->1`，方便核对。
+- **数字编号菜单**：每条前面是绝对编号（`1.`、`2.` …），可以直接点行尾的
+  `前往` / `解锁`，也可以用数字键盘输编号后按 `前往该编号` / `解锁该编号`。
+- `只看未解锁` 切换（cfg 里 `Build/ShowUnlocked`），`Build/PageSize` 控制每页条数。
+- 传送优先走游戏自己的锚点传送（`AnchorsByID.ContainsKey(key)` 命中时用
+  `Commander.PlayerTranslation(key)`），命不中就把玩家 `CurtPos` 直接写到该点的
+  Transform 坐标上。用了哪条路径都会写进日志。
 
 ## 注意事项
 
