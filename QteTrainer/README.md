@@ -23,6 +23,7 @@
 - 战斗破解：一击破防（敌人被打时 HP 直接清零，可独立开关）。
 - 移动速度倍率滑块（0.1 ~ 10）。
 - 一键全物品（快捷批量添加全部物品，数量可调；原 xmod 手动添加仍可并存）。
+  面板按钮之外还有 **`F10` 热键**，游戏进行中直接按就生效，不需要鼠标也不需要暂停菜单。
 - 一键拉满**全部** NPC 好感/星星（默认 5 星，可在 cfg 中改；不再依赖 UI 里选中了谁）。
 - **一键解锁全部办事地点**，以及**带数字编号的办事地点传送菜单**（数字键盘输编号 + 前往/解锁，可分页、可只看未解锁的隐藏地点）。
 - 金钱设为 99999、训练经验 +10000、时间 +8 小时。
@@ -33,6 +34,7 @@
 - **总开关（Master）默认关闭**：游戏一打开时所有功能都是关的，插件对游戏完全不介入。
   进入游戏后按 `F8` 打开总开关（面板同时弹出），再按 `F8` 一键全部关闭并回到未修改状态。
 - 游戏内 ONGUI 面板，`F9` 显示/隐藏，每个功能可实时开关。
+  面板分 `[功能] [传送] [办事地点]` 三页，尺寸自动跟随屏幕（不会溢出界面）。
 - 传送 Key 用面板上的**字符键盘**输入（本游戏不能用文本框，原因见下面「黑屏问题」）。
 - 全部选项写入 `BepInEx/config/arena.qte.trainer.cfg`，重启后保留；但 `Master/Enabled` 与
   `UI/ShowPanel` 每次启动都会被强制重置为 false（除非把 `Master/EnableOnStart` 设为 true）。
@@ -226,6 +228,66 @@ Game.Entity.CurtPos                            // 可写, 用来兜底坐标传�
 - 传送优先走游戏自己的锚点传送（`AnchorsByID.ContainsKey(key)` 命中时用
   `Commander.PlayerTranslation(key)`），命不中就把玩家 `CurtPos` 直接写到该点的
   Transform 坐标上。用了哪条路径都会写进日志。
+
+## v1.4.0：按 log3 定位的三处修正
+
+`LogOutput3.log`（v1.2.0 的运行日志）给出了决定性证据：
+
+```
+[Info ] 办事地点 [IncenseBurner] ...: 解锁 False->True, Rank 0->1      ← 解锁成功
+[Info ] 解锁办事地点完成: 共 24 个, 状态发生变化 24 个。               ← 24 个全部解锁
+[Info ] 好感度已设置 7 个 NPC 为 5 星 (GirlMgr=OK, Commander=OK)。     ← 好感成功
+[Warn ] ProtoMgr.Members 里没找到 Game.ProtoItem(共 120 项)。          ← 物品表定位失败
+[Warn ] No item keys were found.
+[Info ] Added 0 item stacks.
+```
+
+### 1. 添加全部物品：改成按「值类型」认表
+
+`ProtoMgr.Instance` 已经能拿到了（枚举到了 **120** 项 Member），说明 v1.3.0 修的单例问题是对的。
+失败点变成了最后一步：按 `Key.ToString()` 去匹配字符串 `"Game.ProtoItem"` 全部不命中 ——
+`Members` 的 Key 是 `Il2CppSystem.Type`，它的 `ToString()` 并不是 `Game.ProtoItem` 这种形式。
+
+现在不再依赖任何字符串格式，改成**按值类型认**：逐个 Member 取 `KeyMap` 的**第一个**元素，
+看它的 Value 是不是 `Game.ProtoItem`（`KeyMapHoldsProtoItem` + `TryGetFirst`，只探测一条，
+不会把上千条的表整个枚举一遍）。字符串匹配保留为快速路径。
+
+失败时日志会打出 Key 样本，方便下次定位：
+
+```
+GetAllItemKeys: Members=NN 项, 匹配方式=[value type = Game.ProtoItem], 找到物品 Key MMM 个。 样本: a, b, c
+ProtoMgr.Members 里没找到物品表(共 NN 项)。Key 样本: xxx | yyy | zzz ...
+```
+
+> 注意：日志里 `Added 0 item stacks.` 出现了 5 次，说明**按钮点击一直是正常执行的**，
+> 跟"鼠标只在暂停界面显示所以读不到数据"没有关系 —— 数据读到了 120 项，只是没认出哪一项是物品表。
+
+### 2. 新增 F10 一键加物品热键（不需要鼠标 / 不需要暂停菜单）
+
+`Master/AddItemsKey`（默认 `F10`）。游戏进行中直接按就触发，走的是
+`UnityEngine.InputSystem.Keyboard`，和 F8/F9 同一条轮询路径。
+
+每种物品的数量**保留**在面板「功能」页（`-1 / +1 / -10 / +10`），也可以直接改 cfg 的
+`Items/GiveAllCount`。总开关关闭时按 F10 不会加东西，只会提示先按 F8。
+
+### 3. 面板改成分页，尺寸跟着屏幕走
+
+之前固定 `520x760`，在 720p 上内容直接溢出到界面外。现在：
+
+```csharp
+float w = Math.Min(560f, Math.Max(320f, Screen.width  - 16f));
+float h = Math.Min(700f, Math.Max(240f, Screen.height - 16f));
+```
+
+内容拆成三页，顶部 `[功能] [传送] [办事地点]` 切换，单页高度不会再超屏：
+
+| 页 | 内容 |
+|---|---|
+| 功能 | 各功能开关、移速滑块、物品数量 ±、添加全部物品、拉满好感、金钱/经验/时间、一键全开全关、导出导入、关闭总开关 |
+| 传送 | 字符键盘 + 传送 + 码头/黑沼泽/祭坛预设 |
+| 办事地点 | 一键解锁全部、刷新、只看未解锁、数字键盘 + 前往/解锁该编号、分页列表 |
+
+办事地点每页条数由 `Build/PageSize` 控制（默认 8，嫌挤可以调小）。
 
 ## 注意事项
 
