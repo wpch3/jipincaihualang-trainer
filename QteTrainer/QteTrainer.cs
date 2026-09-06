@@ -38,6 +38,8 @@ namespace QteTrainer
         public static ConfigEntry<bool> AllItemsEnabled;
         public static ConfigEntry<bool> InfiniteInventory;
         public static ConfigEntry<int> MaxFavorStars;
+        public static ConfigEntry<int> BuildPageSize;
+        public static ConfigEntry<bool> BuildShowUnlocked;
         public static ConfigEntry<string> TeleportKey;
         public static ConfigEntry<string> TeleportPresetDock;
         public static ConfigEntry<string> TeleportPresetSwamp;
@@ -78,6 +80,8 @@ namespace QteTrainer
             AllItemCount = Config.Bind("Items", "GiveAllCount", 1, "一键添加全部物品时的每种物品数量");
             InfiniteInventory = Config.Bind("Items", "InfiniteInventory", false, "物品数量不减(资源消耗不扣除; 建议进入正常场景后再开启)");
             MaxFavorStars = Config.Bind("NPC", "MaxFavorStars", 5, "一键拉满NPC时设置为多少星");
+            BuildPageSize = Config.Bind("Build", "PageSize", 8, "办事地点菜单每页显示几条");
+            BuildShowUnlocked = Config.Bind("Build", "ShowUnlocked", true, "办事地点菜单里同时显示已解锁的地点(false = 只看还没解锁的隐藏地点)");
             TeleportKey = Config.Bind("Teleport", "Key", "", "快捷传送的锚点/传送点 Key(游戏内用面板上的字符键盘输入, 也可直接写在这里)");
             TeleportPresetDock = Config.Bind("Teleport", "PresetDock", "", "码头预设传送 Key(留空则按钮提示未设置)");
             TeleportPresetSwamp = Config.Bind("Teleport", "PresetSwamp", "", "黑沼泽预设传送 Key(留空则按钮提示未设置)");
@@ -150,12 +154,6 @@ namespace QteTrainer
             return p?.GetValue(obj);
         }
 
-        private static object ReflectIndex(object obj, object key)
-        {
-            if (obj == null) return null;
-            var p = obj.GetType().GetProperty("Item");
-            return p?.GetValue(obj, new object[] { key });
-        }
 
         private static object GetSingleton(Type type)
         {
@@ -279,61 +277,164 @@ namespace QteTrainer
             catch { return false; }
         }
 
+        /// <summary>
+        /// 枚举 Il2Cpp 集合。
+        /// Il2CppInterop 生成的 Dictionary/List 只实现 Il2CppSystem.Collections.IEnumerable,
+        /// **不** 实现 System.Collections.IEnumerable —— 所以旧代码里的
+        /// "keysObj is IEnumerable" 判断永远是 false, 一条物品都取不到。
+        /// 这里改成反射驱动 GetEnumerator/MoveNext/Current, 两种集合都能走。
+        /// (xmod 的 ItemPanelAdapter 也是用 GetEnumerator 走的, 已在 FlowerPicker.dll 的 IL 里确认。)
+        /// </summary>
+        private static List<object> EnumerateAny(object collection)
+        {
+            var list = new List<object>();
+            if (collection == null) return list;
+
+            try
+            {
+                if (collection is IEnumerable managed)
+                {
+                    foreach (var o in managed) list.Add(o);
+                    return list;
+                }
+            }
+            catch { }
+
+            try
+            {
+                var t = collection.GetType();
+                var getEnum = t.GetMethod("GetEnumerator", Type.EmptyTypes);
+                if (getEnum == null)
+                {
+                    QteTrainerPlugin.LogSource?.LogWarning(
+                        $"EnumerateAny: {t.Name} 没有 GetEnumerator(), 无法枚举。");
+                    return list;
+                }
+
+                object en = getEnum.Invoke(collection, null);
+                if (en == null) return list;
+
+                var et = en.GetType();
+                var moveNext = et.GetMethod("MoveNext", Type.EmptyTypes);
+                var current = et.GetProperty("Current")
+                              ?? et.GetProperty("get_Current");
+                if (moveNext == null || current == null)
+                {
+                    QteTrainerPlugin.LogSource?.LogWarning(
+                        $"EnumerateAny: 枚举器 {et.Name} 缺少 MoveNext/Current。");
+                    return list;
+                }
+
+                while (true)
+                {
+                    object more = moveNext.Invoke(en, null);
+                    if (!(more is bool b) || !b) break;
+                    list.Add(current.GetValue(en, null));
+                }
+            }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"EnumerateAny: {ex.GetType().Name}: {ex.Message}");
+            }
+            return list;
+        }
+
+        // Il2Cpp 的 KeyValuePair 有时暴露成 Value, 有时是 value, 两种都试一下。
+        private static object PairPart(object pair, string name)
+        {
+            if (pair == null) return null;
+            var t = pair.GetType();
+            foreach (var candidate in new[] { name, name.ToLowerInvariant() })
+            {
+                var p = t.GetProperty(candidate, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (p != null)
+                {
+                    try { return p.GetValue(pair, null); } catch { }
+                }
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// 取全部物品 Key。
+        ///
+        /// 旧版这里有两个 bug, 导致"添加全部物品"点了没反应:
+        ///   1) 用 typeof(ProtoMgr).GetProperty("Instance", Static|Public|NonPublic) 找单例 ——
+        ///      但 Instance 声明在泛型基类 Game.Singleton`1&lt;ProtoMgr&gt; 上, 而反射找继承来的
+        ///      **静态**成员必须带 BindingFlags.FlattenHierarchy, 否则返回 null, mgr 直接是 null。
+        ///   2) 集合枚举用了 System.Collections.IEnumerable, Il2Cpp 集合不实现它。
+        /// 现在直接用强类型的 ProtoMgr.Instance (C# 允许通过派生类名访问基类静态成员),
+        /// 再用 EnumerateAny 枚举, 和 xmod 的做法一致。
+        /// </summary>
         private static List<string> GetAllItemKeys()
         {
             var result = new List<string>();
             try
             {
-                var mgrType = typeof(ProtoMgr);
-                var instProp = mgrType.GetProperty("Instance", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
-                if (instProp == null)
+                ProtoMgr mgr;
+                try { mgr = ProtoMgr.Instance; }
+                catch (Exception ex)
                 {
-                    // Some Il2Cpp singleton implementations expose it through the generic base type as well.
-                    instProp = mgrType.BaseType?.GetProperty("Instance", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                    QteTrainerPlugin.LogSource?.LogWarning($"ProtoMgr.Instance 读取失败: {ex.GetType().Name}: {ex.Message}");
+                    return result;
                 }
-                object mgr = instProp?.GetValue(null);
-                if (mgr == null) return result;
+
+                if (mgr == null)
+                {
+                    QteTrainerPlugin.LogSource?.LogWarning("ProtoMgr.Instance 为 null(还没进入正常游戏场景?)。");
+                    return result;
+                }
 
                 object members = ReflectGet(mgr, "Members");
-                if (members == null) return result;
-
-                // Find the entry whose key's ToString ends with ProtoItem.
-                object membersKeys = ReflectGet(members, "Keys");
-                object itemMember = null;
-                if (membersKeys is IEnumerable enumKeys)
+                if (members == null)
                 {
-                    var e = enumKeys.GetEnumerator();
-                    while (e.MoveNext())
+                    QteTrainerPlugin.LogSource?.LogWarning("ProtoMgr.Members 为 null。");
+                    return result;
+                }
+
+                // Members 是 Dictionary<Type, ProtoMgr+Member>, 找 Key 为 Game.ProtoItem 的那一项。
+                object itemMember = null;
+                int memberCount = 0;
+                foreach (var pair in EnumerateAny(members))
+                {
+                    memberCount++;
+                    object k = PairPart(pair, "Key");
+                    string name = k?.ToString() ?? string.Empty;
+                    if (name.EndsWith("ProtoItem", StringComparison.OrdinalIgnoreCase))
                     {
-                        object k = e.Current;
-                        string name = k?.ToString() ?? string.Empty;
-                        if (name.IndexOf("ProtoItem", StringComparison.OrdinalIgnoreCase) >= 0)
-                        {
-                            itemMember = ReflectIndex(members, k);
-                            break;
-                        }
+                        itemMember = PairPart(pair, "Value");
+                        break;
                     }
                 }
-                if (itemMember == null) return result;
+
+                if (itemMember == null)
+                {
+                    QteTrainerPlugin.LogSource?.LogWarning(
+                        $"ProtoMgr.Members 里没找到 Game.ProtoItem(共 {memberCount} 项)。");
+                    return result;
+                }
 
                 object keyMap = ReflectGet(itemMember, "KeyMap");
-                if (keyMap == null) return result;
-
-                object keysObj = ReflectGet(keyMap, "Keys");
-                if (keysObj is IEnumerable keyEnum)
+                if (keyMap == null)
                 {
-                    var e = keyEnum.GetEnumerator();
-                    while (e.MoveNext())
-                    {
-                        string key = e.Current?.ToString() ?? string.Empty;
-                        if (!string.IsNullOrWhiteSpace(key))
-                            result.Add(key);
-                    }
+                    QteTrainerPlugin.LogSource?.LogWarning("ProtoItem Member.KeyMap 为 null。");
+                    return result;
                 }
+
+                foreach (var pair in EnumerateAny(keyMap))
+                {
+                    object k = PairPart(pair, "Key");
+                    string key = k?.ToString() ?? string.Empty;
+                    if (!string.IsNullOrWhiteSpace(key))
+                        result.Add(key);
+                }
+
+                QteTrainerPlugin.LogSource?.LogInfo(
+                    $"GetAllItemKeys: Members={memberCount} 项, 找到物品 Key {result.Count} 个。");
             }
             catch (Exception ex)
             {
-                QteTrainerPlugin.LogSource?.LogWarning($"GetAllItemKeys: {ex.Message}");
+                QteTrainerPlugin.LogSource?.LogWarning($"GetAllItemKeys: {ex.GetType().Name}: {ex.Message}");
             }
             return result;
         }
@@ -409,50 +510,311 @@ namespace QteTrainer
             }
         }
 
-        private static string GetSelectedGirlKey()
+        /// <summary>
+        /// 一键拉满全部 NPC 好感/星星。
+        ///
+        /// 旧版靠 MainMenuForm.Instance 反射拿"当前选中的 NPC", 但
+        /// MainMenuForm : UGuiForm : UIFormLogic, 整条继承链上**根本没有 Instance**,
+        /// 所以那个反射永远返回 null, 按钮点了只会打一句"没有选中的NPC"。
+        /// 现在改成走 Game.GirlMgr : Game.Singleton`1&lt;GirlMgr&gt;, 用 GirlMgr.SetFavorStar(key, star),
+        /// 并且直接把所有 NPC 一次拉满(不再依赖 UI 选中谁)。
+        /// </summary>
+        public static int MaxAllNpcFavor(int stars)
         {
+            if (stars < 0) stars = 0;
+            if (stars > 5) stars = 5;
+
+            int done = 0;
+            GirlMgr mgr = null;
+            try { mgr = GirlMgr.Instance; }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"GirlMgr.Instance 读取失败: {ex.GetType().Name}: {ex.Message}");
+            }
+
+            var commander = GetCommander();
+
+            // 1) 先用存档里已经存在的 InfoGirl(这些才是真正能被改到的)。
+            if (mgr != null)
+            {
+                try
+                {
+                    object girls = ReflectGet(mgr, "Girls");
+                    foreach (var o in EnumerateAny(girls))
+                    {
+                        var info = o as InfoGirl;
+                        if (info == null) continue;
+                        string key = null;
+                        try { key = info.Proto?.Key; } catch { }
+                        if (string.IsNullOrWhiteSpace(key)) continue;
+                        if (SetFavorStarOnce(mgr, commander, key, stars)) done++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    QteTrainerPlugin.LogSource?.LogWarning($"遍历 GirlMgr.Girls 失败: {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+
+            // 2) 再用 ProtoGirl.GetProtoAll() 补齐(静态表, 覆盖还没进存档的 NPC)。
             try
             {
-                var mfType = typeof(MainMenuForm);
-                var instanceProp = mfType.GetProperty("Instance", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
-                object mainMenu = instanceProp?.GetValue(null);
-                if (mainMenu == null) return null;
-                object page = ReflectGet(mainMenu, "CharInfoPage");
-                if (page == null) return null;
-                object current = ReflectGet(page, "m_Current");
-                if (current == null) return null;
-                var keyProp = current.GetType().GetProperty("Key", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                return keyProp?.GetValue(current)?.ToString();
+                foreach (var o in EnumerateAny(ProtoGirl.GetProtoAll()))
+                {
+                    var proto = o as ProtoGirl;
+                    if (proto == null) continue;
+                    string key = null;
+                    try { key = proto.Key; } catch { }
+                    if (string.IsNullOrWhiteSpace(key)) continue;
+                    if (SetFavorStarOnce(mgr, commander, key, stars)) done++;
+                }
             }
             catch (Exception ex)
             {
-                QteTrainerPlugin.LogSource?.LogWarning($"GetSelectedGirlKey: {ex.Message}");
-                return null;
+                QteTrainerPlugin.LogSource?.LogWarning($"ProtoGirl.GetProtoAll 失败: {ex.GetType().Name}: {ex.Message}");
+            }
+
+            QteTrainerPlugin.LogSource?.LogInfo(
+                $"好感度已设置 {done} 个 NPC 为 {stars} 星 (GirlMgr={(mgr != null ? "OK" : "null")}, Commander={(commander != null ? "OK" : "null")})。");
+            return done;
+        }
+
+        private static bool SetFavorStarOnce(GirlMgr mgr, Commander commander, string key, int stars)
+        {
+            bool ok = false;
+            if (mgr != null)
+            {
+                try { mgr.SetFavorStar(key, stars); ok = true; }
+                catch (Exception ex)
+                {
+                    QteTrainerPlugin.LogSource?.LogWarning($"GirlMgr.SetFavorStar({key}) 失败: {ex.Message}");
+                }
+            }
+            if (!ok && commander != null)
+            {
+                try { commander.CmdSetNPCFavorStar(key, stars); ok = true; }
+                catch (Exception ex)
+                {
+                    QteTrainerPlugin.LogSource?.LogWarning($"Commander.CmdSetNPCFavorStar({key}) 失败: {ex.Message}");
+                }
+            }
+            return ok;
+        }
+
+        /* --------------------------------------------------------------------
+         * 办事地点 (Game.BuildPointMgr / BuildPoint / InfoBuild / ProtoBuild)
+         *
+         * 已确认的类型关系:
+         *   BuildPointMgr : Game.SingletonMono`1<BuildPointMgr>   -> BuildPointMgr.Instance
+         *     .BuildPoints      -> List<BuildPoint>
+         *     .DicBuildPoints   -> Dictionary<string, BuildPoint>
+         *     .IsBuildUnlock(k) / .GetUpgradeRank(k) / .CanUpgrade(k) / .Upgrade(k)
+         *   BuildPoint : MonoBehaviour
+         *     .Key / .Info(InfoBuild) / .Proto(ProtoBuild) / .Upgrade() / .RefreshState()
+         *   InfoBuild  : .IsUnlock(只读) / .Rank(可写) / .CanBuild(可写) / .Proto
+         *   ProtoBuild : .Name / .Desc / .Condition / .Cost
+         * -------------------------------------------------------------------- */
+        public sealed class BuildEntry
+        {
+            public string Key;
+            public string Name;
+            public bool IsUnlock;
+            public int Rank;
+            public BuildPoint Point;
+        }
+
+        public static List<BuildEntry> GetBuildPoints()
+        {
+            var result = new List<BuildEntry>();
+            BuildPointMgr mgr = null;
+            try { mgr = BuildPointMgr.Instance; }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"BuildPointMgr.Instance 读取失败: {ex.GetType().Name}: {ex.Message}");
+                return result;
+            }
+            if (mgr == null)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning("BuildPointMgr.Instance 为 null(还没进入带办事地点的场景?)。");
+                return result;
+            }
+
+            try
+            {
+                object points = ReflectGet(mgr, "BuildPoints");
+                foreach (var o in EnumerateAny(points))
+                {
+                    var bp = o as BuildPoint;
+                    if (bp == null) continue;
+                    var e = new BuildEntry { Point = bp };
+                    try { e.Key = bp.Key; } catch { }
+                    try { e.Name = bp.Proto != null ? bp.Proto.Name : null; } catch { }
+                    if (string.IsNullOrWhiteSpace(e.Name)) e.Name = e.Key;
+                    try { e.IsUnlock = mgr.IsBuildUnlock(e.Key); } catch { }
+                    try { e.Rank = mgr.GetUpgradeRank(e.Key); } catch { }
+                    result.Add(e);
+                }
+            }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"GetBuildPoints: {ex.GetType().Name}: {ex.Message}");
+            }
+            return result;
+        }
+
+        /// <summary>一键解锁全部办事地点。先走游戏的 Upgrade 正常流程, 不行再直接改 InfoBuild 兜底。</summary>
+        public static int UnlockAllBuildPoints()
+        {
+            BuildPointMgr mgr = null;
+            try { mgr = BuildPointMgr.Instance; }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"BuildPointMgr.Instance 读取失败: {ex.GetType().Name}: {ex.Message}");
+                return 0;
+            }
+            if (mgr == null)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning("BuildPointMgr.Instance 为 null, 无法解锁办事地点。");
+                return 0;
+            }
+
+            // Upgrade 可能要花钱, 先把钱拉满, 免得因为余额不足失败。
+            SetGold(9999999);
+
+            int changed = 0, total = 0;
+            foreach (var e in GetBuildPoints())
+            {
+                total++;
+                var bp = e.Point;
+                if (bp == null) continue;
+                bool before = e.IsUnlock;
+                int rankBefore = e.Rank;
+
+                // 1) 正常流程
+                try
+                {
+                    bool can = true;
+                    try { can = mgr.CanUpgrade(e.Key); } catch { }
+                    if (can) mgr.Upgrade(e.Key);
+                }
+                catch (Exception ex)
+                {
+                    QteTrainerPlugin.LogSource?.LogWarning($"BuildPointMgr.Upgrade({e.Key}) 失败: {ex.Message}");
+                }
+
+                // 2) 兜底: 直接写 InfoBuild
+                try
+                {
+                    var info = bp.Info;
+                    if (info != null)
+                    {
+                        bool stillLocked = true;
+                        try { stillLocked = !info.IsUnlock; } catch { }
+                        if (stillLocked)
+                        {
+                            try { info.CanBuild = true; } catch { }
+                            try { if (info.Rank < 1) info.Rank = 1; } catch { }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    QteTrainerPlugin.LogSource?.LogWarning($"改 InfoBuild({e.Key}) 失败: {ex.Message}");
+                }
+
+                // 3) 刷新场景里的显示状态
+                try { bp.RefreshState(); } catch { }
+
+                bool after = false;
+                int rankAfter = rankBefore;
+                try { after = mgr.IsBuildUnlock(e.Key); } catch { }
+                try { rankAfter = mgr.GetUpgradeRank(e.Key); } catch { }
+                if (after != before || rankAfter != rankBefore) changed++;
+
+                QteTrainerPlugin.LogSource?.LogInfo(
+                    $"办事地点 [{e.Key}] {e.Name}: 解锁 {before}->{after}, Rank {rankBefore}->{rankAfter}");
+            }
+
+            QteTrainerPlugin.LogSource?.LogInfo($"解锁办事地点完成: 共 {total} 个, 状态发生变化 {changed} 个。");
+            return changed;
+        }
+
+        /// <summary>
+        /// 传送到某个办事地点。
+        /// 先试游戏自己的锚点传送(Commander.PlayerTranslation 是 public static),
+        /// 不行就直接把玩家坐标写到该点的 Transform 上(Entity.CurtPos 可写)。
+        /// </summary>
+        public static void TeleportToBuild(BuildEntry entry)
+        {
+            if (entry == null) return;
+
+            // 1) 如果这个 Key 正好是注册过的锚点, 用游戏自己的传送
+            try
+            {
+                var anchors = MapAuxAnchorMgr.Instance;
+                if (anchors != null && !string.IsNullOrWhiteSpace(entry.Key))
+                {
+                    object byId = ReflectGet(anchors, "AnchorsByID");
+                    if (byId != null)
+                    {
+                        object has = null;
+                        try
+                        {
+                            var m = byId.GetType().GetMethod("ContainsKey");
+                            if (m != null) has = m.Invoke(byId, new object[] { entry.Key });
+                        }
+                        catch { }
+                        if (has is bool yes && yes)
+                        {
+                            Commander.PlayerTranslation(entry.Key);
+                            QteTrainerPlugin.LogSource?.LogInfo($"已用锚点传送到办事地点 [{entry.Key}] {entry.Name}。");
+                            return;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"锚点传送({entry.Key})失败, 改用坐标传送: {ex.Message}");
+            }
+
+            // 2) 兜底: 直接改玩家坐标
+            try
+            {
+                var crt = GetLocalCrtPublic();
+                if (crt == null)
+                {
+                    QteTrainerPlugin.LogSource?.LogWarning("拿不到本地玩家 Creature, 无法坐标传送。");
+                    return;
+                }
+
+                UnityEngine.Transform tf = null;
+                try { tf = entry.Point != null ? entry.Point.transform : null; } catch { }
+                if (tf == null)
+                {
+                    try { tf = entry.Point != null ? entry.Point.TransCamera : null; } catch { }
+                }
+                if (tf == null)
+                {
+                    QteTrainerPlugin.LogSource?.LogWarning($"办事地点 [{entry.Key}] 没有可用的 Transform。");
+                    return;
+                }
+
+                crt.CurtPos = tf.position;
+                QteTrainerPlugin.LogSource?.LogInfo(
+                    $"已坐标传送到办事地点 [{entry.Key}] {entry.Name} @ {tf.position}。");
+            }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"TeleportToBuild({entry.Key}): {ex.GetType().Name}: {ex.Message}");
             }
         }
 
-        public static void MaxSelectedNpc()
+        // GetLocalCrt 是 private, 给上面几个功能开一个入口。
+        private static Creature GetLocalCrtPublic()
         {
-            try
-            {
-                var key = GetSelectedGirlKey();
-                if (string.IsNullOrWhiteSpace(key))
-                {
-                    QteTrainerPlugin.LogSource?.LogWarning("没有选中的NPC，请先在角色/好感页面选中一个NPC。");
-                    return;
-                }
-                var commander = GetCommander();
-                if (commander == null) return;
-                int stars = QteTrainerPlugin.MaxFavorStars.Value;
-                if (stars < 0) stars = 0;
-                if (stars > 5) stars = 5;
-                commander.CmdSetNPCFavorStar(key, stars);
-                QteTrainerPlugin.LogSource?.LogInfo($"Set {key} favor star to {stars}.");
-            }
-            catch (Exception ex)
-            {
-                QteTrainerPlugin.LogSource?.LogWarning($"MaxSelectedNpc: {ex.Message}");
-            }
+            RefreshLocalReferences();
+            return _cachedLocalCrt;
         }
 
         public static void Teleport(string key)
@@ -466,17 +828,27 @@ namespace QteTrainer
             try
             {
                 var commander = GetCommander();
-                if (commander == null)
+                if (commander != null)
                 {
-                    QteTrainerPlugin.LogSource?.LogWarning("Commander.Instance is null, 无法传送。");
+                    commander.CmdPlayerTranslation(key);
+                    QteTrainerPlugin.LogSource?.LogInfo($"Teleport requested: {key}");
                     return;
                 }
-                commander.CmdPlayerTranslation(key);
-                QteTrainerPlugin.LogSource?.LogInfo($"Teleport requested: {key}");
             }
             catch (Exception ex)
             {
-                QteTrainerPlugin.LogSource?.LogWarning($"Teleport({key}): {ex.Message}");
+                QteTrainerPlugin.LogSource?.LogWarning($"CmdPlayerTranslation({key}) 失败, 改用静态 PlayerTranslation: {ex.Message}");
+            }
+
+            // Commander.PlayerTranslation(string) 是 public static, 不需要单例。
+            try
+            {
+                Commander.PlayerTranslation(key);
+                QteTrainerPlugin.LogSource?.LogInfo($"Teleport requested (static): {key}");
+            }
+            catch (Exception ex)
+            {
+                QteTrainerPlugin.LogSource?.LogWarning($"Teleport({key}): {ex.GetType().Name}: {ex.Message}");
             }
         }
 
@@ -830,6 +1202,11 @@ namespace QteTrainer
         private int guiFailures;
         private int updateFailures;
 
+        // 办事地点菜单状态
+        private List<TrainerActions.BuildEntry> buildList;
+        private int buildPage;
+        private string buildNumber = string.Empty;
+
         private void Update()
         {
             // 总开关关闭时也要能按键开启, 所以 Update 永远只做一件事: 轮询热键。
@@ -925,7 +1302,7 @@ namespace QteTrainer
         {
             EnsureTeleportInput();
 
-            GUILayout.BeginArea(new Rect(8, 8, 440, 600));
+            GUILayout.BeginArea(new Rect(8, 8, 520, 760));
             GUILayout.Label("<b>QTE / 万能 Trainer</b>");
             GUILayout.Label($"总开关: 开  ({QteTrainerPlugin.ToggleKey.Value} 关闭全部 / {QteTrainerPlugin.PanelKey.Value} 隐藏面板)");
 
@@ -950,9 +1327,9 @@ namespace QteTrainer
                 int n = TrainerActions.AddAllItems(QteTrainerPlugin.AllItemCount.Value);
                 QteTrainerPlugin.LogSource?.LogInfo($"Added {n} item stacks.");
             }
-            if (GUILayout.Button("拉满当前NPC好感/星星 (" + QteTrainerPlugin.MaxFavorStars.Value + "星)"))
+            if (GUILayout.Button("拉满全部NPC好感/星星 (" + QteTrainerPlugin.MaxFavorStars.Value + "星)"))
             {
-                TrainerActions.MaxSelectedNpc();
+                TrainerActions.MaxAllNpcFavor(QteTrainerPlugin.MaxFavorStars.Value);
             }
             if (GUILayout.Button("金钱设为 99999"))
             {
@@ -1002,6 +1379,8 @@ namespace QteTrainer
                 GUILayout.Label("提示: 预设 Key 在 cfg 中设置后即可用；或用上面的字符键盘输入后传送。", GUI.skin.box);
             }
 
+            DrawBuildMenu();
+
             GUILayout.Space(6);
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("一键全开"))
@@ -1022,6 +1401,148 @@ namespace QteTrainer
             GUILayout.Label($"快捷键: {QteTrainerPlugin.ToggleKey.Value} 总开关 / {QteTrainerPlugin.PanelKey.Value} 显示或隐藏面板");
 
             GUILayout.EndArea();
+        }
+
+        /* --------------------------------------------------------------------
+         * 办事地点菜单
+         *
+         * 数据来自 Game.BuildPointMgr.Instance.BuildPoints(见 TrainerActions 里的说明),
+         * 每个选项前面带**绝对编号**, 可以直接用下面的数字键盘输编号再按"前往"。
+         * 列表每次打开面板时按需刷新, 不做每帧反射。
+         * -------------------------------------------------------------------- */
+        private void DrawBuildMenu()
+        {
+            GUILayout.Space(6);
+            GUILayout.Label("<b>办事地点 / 隐藏地点</b>", GUI.skin.label);
+
+            if (buildList == null)
+                buildList = TrainerActions.GetBuildPoints();
+
+            int pageSize = Math.Max(1, QteTrainerPlugin.BuildPageSize.Value);
+
+            // 过滤: 可以选择只看还没解锁的(= 隐藏地点)
+            var shown = new List<TrainerActions.BuildEntry>();
+            int hiddenCount = 0;
+            if (buildList != null)
+            {
+                foreach (var e in buildList)
+                {
+                    if (e == null) continue;
+                    if (!e.IsUnlock) hiddenCount++;
+                    if (!QteTrainerPlugin.BuildShowUnlocked.Value && e.IsUnlock) continue;
+                    shown.Add(e);
+                }
+            }
+
+            GUILayout.Label(
+                $"共 {buildList?.Count ?? 0} 个地点, 未解锁 {hiddenCount} 个; 当前列出 {shown.Count} 个"
+                + (QteTrainerPlugin.BuildShowUnlocked.Value ? "" : " (只显示未解锁)"));
+
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("一键解锁全部办事地点"))
+            {
+                int n = TrainerActions.UnlockAllBuildPoints();
+                QteTrainerPlugin.LogSource?.LogInfo($"解锁办事地点: {n} 个状态变化。");
+                buildList = TrainerActions.GetBuildPoints();
+            }
+            if (GUILayout.Button("刷新列表", GUILayout.Width(80)))
+            {
+                buildList = TrainerActions.GetBuildPoints();
+                buildPage = 0;
+            }
+            if (GUILayout.Button(QteTrainerPlugin.BuildShowUnlocked.Value ? "只看未解锁" : "显示全部", GUILayout.Width(90)))
+            {
+                QteTrainerPlugin.BuildShowUnlocked.Value = !QteTrainerPlugin.BuildShowUnlocked.Value;
+                buildPage = 0;
+            }
+            GUILayout.EndHorizontal();
+
+            // 数字键盘 + 前往
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("编号:", GUILayout.Width(40));
+            GUILayout.Label("[" + (string.IsNullOrEmpty(buildNumber) ? "-" : buildNumber) + "]", GUILayout.Width(50));
+            for (int d = 1; d <= 9; d++)
+            {
+                int digit = d;
+                if (GUILayout.Button(digit.ToString(), GUILayout.Width(26), GUILayout.Height(22)))
+                    buildNumber += digit.ToString();
+            }
+            if (GUILayout.Button("0", GUILayout.Width(26), GUILayout.Height(22)))
+                buildNumber += "0";
+            if (GUILayout.Button("⌫", GUILayout.Width(30), GUILayout.Height(22)) && buildNumber.Length > 0)
+                buildNumber = buildNumber.Substring(0, buildNumber.Length - 1);
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("前往该编号", GUILayout.Width(110)))
+            {
+                if (int.TryParse(buildNumber, out int idx) && idx >= 1 && idx <= shown.Count)
+                {
+                    TrainerActions.TeleportToBuild(shown[idx - 1]);
+                }
+                else
+                {
+                    QteTrainerPlugin.LogSource?.LogWarning(
+                        $"编号 \"{buildNumber}\" 超出范围(1..{shown.Count})。");
+                }
+            }
+            if (GUILayout.Button("解锁该编号", GUILayout.Width(110)))
+            {
+                if (int.TryParse(buildNumber, out int idx) && idx >= 1 && idx <= shown.Count)
+                {
+                    var e = shown[idx - 1];
+                    TrainerActions.UnlockAllBuildPoints();
+                    buildList = TrainerActions.GetBuildPoints();
+                    QteTrainerPlugin.LogSource?.LogInfo($"已对 [{e.Key}] {e.Name} 执行解锁。");
+                }
+                else
+                {
+                    QteTrainerPlugin.LogSource?.LogWarning(
+                        $"编号 \"{buildNumber}\" 超出范围(1..{shown.Count})。");
+                }
+            }
+            if (GUILayout.Button("清空", GUILayout.Width(60)))
+                buildNumber = string.Empty;
+            GUILayout.EndHorizontal();
+
+            // 分页
+            int pages = Math.Max(1, (shown.Count + pageSize - 1) / pageSize);
+            if (buildPage >= pages) buildPage = pages - 1;
+            if (buildPage < 0) buildPage = 0;
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label($"第 {buildPage + 1}/{pages} 页", GUILayout.Width(80));
+            if (GUILayout.Button("上一页", GUILayout.Width(70))) buildPage = Math.Max(0, buildPage - 1);
+            if (GUILayout.Button("下一页", GUILayout.Width(70))) buildPage = Math.Min(pages - 1, buildPage + 1);
+            GUILayout.EndHorizontal();
+
+            if (shown.Count == 0)
+            {
+                GUILayout.Label("当前场景没有读到办事地点(需要先进到有办事地点的地图)。", GUI.skin.box);
+                return;
+            }
+
+            int from = buildPage * pageSize;
+            int to = Math.Min(shown.Count, from + pageSize);
+            for (int i = from; i < to; i++)
+            {
+                var e = shown[i];
+                string label = $"{i + 1}. {e.Name}";
+                if (!string.IsNullOrWhiteSpace(e.Key) && e.Key != e.Name)
+                    label += $" ({e.Key})";
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label(label, GUILayout.Width(280));
+                GUILayout.Label(e.IsUnlock ? $"已解锁 Lv{e.Rank}" : "未解锁", GUILayout.Width(80));
+                if (GUILayout.Button("前往", GUILayout.Width(52)))
+                    TrainerActions.TeleportToBuild(e);
+                if (GUILayout.Button("解锁", GUILayout.Width(52)))
+                {
+                    TrainerActions.UnlockAllBuildPoints();
+                    buildList = TrainerActions.GetBuildPoints();
+                }
+                GUILayout.EndHorizontal();
+            }
         }
 
         private void KeypadRow(string chars)
