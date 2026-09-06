@@ -270,11 +270,21 @@ namespace QteTrainer
                     }
                 }
                 catch { }
-                // 2) PlayerMgr.LocalPlayer.Info
+                // 2) PlayerMgr.LocalPlayer.Crt.Info
+                //    注意: Player.Info 返回的是 InfoPlayer(: InfoProtoBase), 和 InfoCreature
+                //    没有继承关系, 不能 as InfoCreature。Creature 身上的才是 InfoCreature。
                 try
                 {
                     var lp = pm.LocalPlayer;
-                    if (lp != null) return lp.Info as InfoCreature;
+                    if (lp != null)
+                    {
+                        var lpCrt = lp.Crt;
+                        if (lpCrt != null)
+                        {
+                            var info = lpCrt.Info as InfoCreature;
+                            if (info != null) return info;
+                        }
+                    }
                 }
                 catch { }
                 return null;
